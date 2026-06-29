@@ -18,14 +18,23 @@ Setup (one-time, in dashboard_venv):
     pip install mcp firebase-admin
 """
 
+import os
+import json
 import firebase_admin
 from firebase_admin import credentials, firestore
 from mcp.server.fastmcp import FastMCP
 
 # ── Firebase connection ──
-# Reuses the same serviceAccountKey.json as dashboard.py
+# Locally: reads serviceAccountKey.json from this folder (unchanged).
+# On Render (or any deployed host): reads the same JSON content from an
+# environment variable instead, since you never upload secret files to
+# a git repo or a server's filesystem directly.
 if not firebase_admin._apps:
-    cred = credentials.Certificate("serviceAccountKey.json")
+    service_account_json = os.environ.get("FIREBASE_SERVICE_ACCOUNT_JSON")
+    if service_account_json:
+        cred = credentials.Certificate(json.loads(service_account_json))
+    else:
+        cred = credentials.Certificate("serviceAccountKey.json")
     firebase_admin.initialize_app(cred)
 
 db = firestore.client()

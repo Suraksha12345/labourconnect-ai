@@ -15,6 +15,7 @@ avoid dependency conflicts between firebase-admin and litellm.
 """
 
 import os
+import sys
 from dotenv import load_dotenv
 from crewai import Agent, Task, Crew
 from crewai_tools import MCPServerAdapter
@@ -31,13 +32,18 @@ load_dotenv()
 import crewai.llms.cache as _crewai_cache
 _crewai_cache.mark_cache_breakpoint = lambda msg: msg
 
-# ── Path to the dashboard_venv's Python interpreter, where mcp_server.py
-#    actually runs (it needs firebase-admin, which lives there). ──
-DASHBOARD_VENV_PYTHON = r"C:\labourconnect_ai\dashboard_venv\Scripts\python.exe"
-MCP_SERVER_SCRIPT = r"C:\labourconnect_ai\mcp_server.py"
+# ── Where mcp_server.py actually runs ──
+# Locally on Windows: a SEPARATE venv (dashboard_venv) that has
+# firebase-admin, kept apart from this venv to dodge a dependency
+# conflict. On a deployed host like Render, everything lives in one
+# environment, so this just falls back to whichever Python is
+# currently running this script — no manual switching needed.
+_LOCAL_DASHBOARD_PYTHON = r"C:\labourconnect_ai\dashboard_venv\Scripts\python.exe"
+MCP_PYTHON = _LOCAL_DASHBOARD_PYTHON if os.path.exists(_LOCAL_DASHBOARD_PYTHON) else sys.executable
+MCP_SERVER_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mcp_server.py")
 
 server_params = StdioServerParameters(
-    command=DASHBOARD_VENV_PYTHON,
+    command=MCP_PYTHON,
     args=[MCP_SERVER_SCRIPT],
     env=os.environ.copy(),
 )
