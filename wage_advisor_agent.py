@@ -1,54 +1,67 @@
-import os
-from dotenv import load_dotenv
-from groq import Groq
+"""
+Wage Advisor Agent — now powered by CrewAI + MCP (Layer 4)
+=============================================================
+Previously this agent relied entirely on the LLM's general knowledge
+of "typical wages." Now it has two MCP tools that pull real data:
+get_wage_data (a static benchmark range) and get_recent_wages (actual
+wages from currently posted jobs in Firestore) — so its advice is
+grounded in real, current postings, not just a guess.
+"""
 
-# Load your Groq API key from .env
+from dotenv import load_dotenv
+from crewai import Agent, Task, Crew
+from crewai_tools import MCPServerAdapter
+
+from mcp_connection import mcp_server_params
+
 load_dotenv()
 
-# Connect directly to Groq (proven to work from test_groq.py)
-client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
 
-# ─── Agent definition (CrewAI-style structure, kept for documentation) ───
-WAGE_ADVISOR_ROLE = "Wage Advisor"
-WAGE_ADVISOR_GOAL = "Determine if a daily wage is fair for rural Karnataka daily wage workers"
-WAGE_ADVISOR_BACKSTORY = (
-    "You are an expert in rural Karnataka labour markets. "
-    "You know typical daily wages for masons, painters, farmers, "
-    "plumbers, electricians and drivers across different districts "
-    "like Dakshina Kannada, Udupi, and surrounding areas. "
-    "You always give clear, practical advice that protects workers "
-    "from being underpaid, while being fair to contractors too."
-)
-
-# ─── The actual task execution function ───
 def check_wage(skill, location, offered_wage):
     """
-    Wage Advisor Agent — checks if an offered daily wage is fair.
+    Wage Advisor Agent — checks if an offered wage is fair, using
+    both a static benchmark and real recent postings via MCP tools.
     """
-    task_description = (
-        f"A contractor is offering ₹{offered_wage} per day for a "
-        f"{skill} in {location}, Karnataka. "
-        f"Is this a fair wage? Give a clear verdict (FAIR or LOW) "
-        f"followed by a 1-2 sentence reason, and suggest a fair "
-        f"wage range if the offer is too low."
-    )
+    with MCPServerAdapter(mcp_server_params) as tools:
+        agent = Agent(
+            role="Wage Advisor Agent",
+            goal="Tell daily wage workers whether an offered wage is fair for their skill and location",
+            backstory=(
+                "You are a fair-wage expert for daily labour markets in "
+                "rural Karnataka. You use the get_wage_data tool for a "
+                "standard benchmark range, and get_recent_wages to check "
+                "what real jobs are currently paying for this skill. You "
+                "combine both to give grounded, practical advice."
+            ),
+            tools=tools,
+            llm="groq/llama-3.3-70b-versatile",
+            verbose=True,
+        )
 
-    response = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=[
-            {"role": "system", "content": WAGE_ADVISOR_BACKSTORY},
-            {"role": "user", "content": task_description}
-        ]
-    )
+        task = Task(
+            description=(
+                f"A worker with skill '{skill}' in '{location}' has been "
+                f"offered a wage of {offered_wage} rupees per day. Call "
+                f"get_wage_data once with this skill and location to get "
+                f"the standard benchmark range. Also call get_recent_wages "
+                f"once with this skill and location to see what real jobs "
+                f"are currently paying. Then judge whether {offered_wage} "
+                f"is LOW, FAIR, or HIGH, briefly explaining why using both "
+                f"data points. Keep it to 2-3 short sentences."
+            ),
+            agent=agent,
+            expected_output=(
+                "A short verdict (LOW/FAIR/HIGH) with 2-3 sentences of "
+                "reasoning grounded in the benchmark and recent wage data."
+            ),
+        )
 
-    return response.choices[0].message.content
+        crew = Crew(agents=[agent], tasks=[task], verbose=True)
+        result = crew.kickoff()
+        return str(result)
 
-# ─── Test it directly when this file is run ───
+
 if __name__ == "__main__":
-    print(f"\n🤖 Agent: {WAGE_ADVISOR_ROLE}")
-    print(f"Task: Check wage for Mason in Sullia at ₹350/day\n")
-
-    result = check_wage(skill="Mason", location="Sullia", offered_wage=350)
-
-    print("========= FINAL RESULT =========")
-    print(result)
+    print("\n🤖 Agent: Wage Advisor Agent (via MCP)\n")
+    print("========= TEST: Mason offered 500/day in Mangalore =========")
+    print(check_wage(skill="Mason", location="Mangalore", offered_wage=500))

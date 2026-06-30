@@ -1,24 +1,20 @@
-import os
+"""
+Chatbot Agent — now powered by CrewAI + MCP (Layer 4)
+=========================================================
+Adds three MCP tools: get_worker_profile, get_government_schemes,
+and list_jobs. Tulu pre-written-response logic is UNCHANGED.
+"""
+
 from dotenv import load_dotenv
-from groq import Groq
+from crewai import Agent, Task, Crew
+from crewai_tools import MCPServerAdapter
+
+from mcp_connection import mcp_server_params
 
 load_dotenv()
-client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
 
-# ─── Agent definition ───
 CHATBOT_ROLE = "LabourConnect Chatbot Agent"
-CHATBOT_BACKSTORY = (
-    "You are a friendly, helpful assistant for LabourConnect, an app "
-    "that helps daily wage workers in rural Karnataka find jobs. "
-    "Workers may ask about finding jobs, checking if a wage is fair, "
-    "registration steps, or general help. Keep your answers short, "
-    "simple, and practical. Always reply in the SAME language the "
-    "worker used to ask the question."
-)
 
-# ─── Pre-written Tulu answers for common questions ───
-# (Tulu has very little AI training data, so we use verified
-#  human-written translations instead of relying on the AI model)
 TULU_RESPONSES = {
     "job_search": (
         "ಕೆಲಸ ತೂವೆರೆ LabourConnect ಆಪ್‌ದ Home screen ಗ್ ಪೋಲೆ. "
@@ -36,14 +32,8 @@ TULU_RESPONSES = {
     ),
 }
 
-def detect_tulu_intent(message):
-    """
-    Simple keyword check to find what the worker is asking about,
-    so we can use a verified Tulu answer instead of risking an
-    AI-generated one that may default to Kannada.
-    """
-    message_lower = message.lower()
 
+def detect_tulu_intent(message):
     job_keywords = ["ಕೆಲಸ ಬೋಡು", "ಕೆಲಸ", "ಉದ್ಯೋಗ"]
     wage_keywords = ["ವೇತನ", "ಕೂಲಿ", "ಪಗಾರ್"]
     register_keywords = ["ನೋಂದಣಿ", "ರಿಜಿಸ್ಟರ್"]
@@ -56,54 +46,69 @@ def detect_tulu_intent(message):
         return "job_search"
     return None
 
-def chat_with_worker(worker_message, language="auto"):
+
+def chat_with_worker(worker_message, language="auto", worker_phone=""):
     """
-    Chatbot Agent — replies to a worker's question.
-    For Tulu, checks pre-written answers first (AI has poor Tulu support).
-    For all other languages, uses AI directly.
+    Chatbot Agent — Tulu uses pre-written answers first (unchanged).
+    All other languages use a real CrewAI agent with MCP tools.
     """
     if language == "Tulu":
         intent = detect_tulu_intent(worker_message)
         if intent and intent in TULU_RESPONSES:
             return TULU_RESPONSES[intent]
-        # If we don't recognize the question, fall back to AI
-        # (may reply in Kannada — acceptable as last resort)
 
-    response = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=[
-            {"role": "system", "content": CHATBOT_BACKSTORY},
-            {"role": "user", "content": worker_message}
-        ]
-    )
-    return response.choices[0].message.content
+    with MCPServerAdapter(mcp_server_params) as tools:
+        agent = Agent(
+            role=CHATBOT_ROLE,
+            goal="Help daily wage workers with questions about jobs, wages, registration, benefits, or anything else",
+            backstory=(
+                "You are a friendly, helpful assistant inside "
+                "LabourConnect, an app for daily wage workers in rural "
+                "Karnataka. You can help with job search (use list_jobs), "
+                "questions about the worker's own profile (use "
+                "get_worker_profile with their phone number), government "
+                "welfare schemes and benefits (use get_government_schemes), "
+                "or general questions about anything else. Only call a "
+                "tool if the question actually needs that specific data — "
+                "for general chit-chat or unrelated questions, answer "
+                "directly without calling any tool. Keep answers short, "
+                "simple, and practical. Always reply in the SAME language "
+                "the worker used to ask the question."
+            ),
+            tools=tools,
+            llm="groq/llama-3.3-70b-versatile",
+            verbose=True,
+        )
 
-# ─── Test it directly when this file is run ───
+        task = Task(
+            description=(
+                f"The worker's phone number (for get_worker_profile, if "
+                f"needed) is '{worker_phone}'. The worker asked, in "
+                f"{language}: \"{worker_message}\"\n\n"
+                f"Reply helpfully in the same language they used. Only "
+                f"use a tool if the question genuinely requires that "
+                f"data. For anything else, just answer directly."
+            ),
+            agent=agent,
+            expected_output="A short, helpful reply in the same language as the question.",
+        )
+
+        crew = Crew(agents=[agent], tasks=[task], verbose=True)
+        result = crew.kickoff()
+        return str(result)
+
+
 if __name__ == "__main__":
     print(f"\n🤖 Agent: {CHATBOT_ROLE}\n")
 
-    print("========= TEST 1: English =========")
-    print("Worker asks: How do I find a mason job near me?")
-    print("Reply:", chat_with_worker("How do I find a mason job near me?", language="English"))
+    print("========= TEST 1: English job search =========")
+    print(chat_with_worker("Are there any mason jobs near Mangalore?", language="English"))
 
-    print("\n========= TEST 2: Kannada =========")
-    print("Worker asks: ನನಗೆ ಕೆಲಸ ಬೇಕು")
-    print("Reply:", chat_with_worker("ನನಗೆ ಕೆಲಸ ಬೇಕು", language="Kannada"))
+    print("\n========= TEST 2: English profile question =========")
+    print(chat_with_worker("What is my registered skill?", language="English", worker_phone="9876543210"))
 
-    print("\n========= TEST 3: Hindi =========")
-    print("Worker asks: मुझे काम चाहिए")
-    print("Reply:", chat_with_worker("मुझे काम चाहिए", language="Hindi"))
+    print("\n========= TEST 3: English benefits question =========")
+    print(chat_with_worker("Is there any insurance scheme for workers like me?", language="English"))
 
-    tulu_tests = [
-        ("Job search — phrasing 1", "ಎಂಕ್ ಕೆಲಸ ಬೋಡು"),
-        ("Job search — phrasing 2", "ಕೆಲಸ ಎಲ್ಲಿ ತೂವೊಡು?"),
-        ("Wage check — phrasing 1", "ಎಂಕ್ ವೇತನ ಸರಿ ಉಂಡಾ ಪನ್ಪಿನ ಗೊತ್ತಾಪುಜಿ"),
-        ("Wage check — phrasing 2", "ಕೂಲಿ ಎಷ್ಟು ಸರಿ?"),
-        ("Registration", "ಎಂಕ್ ನೋಂದಣಿ ಮಲ್ಪೊಡು"),
-        ("Unmatched / random question", "ಎಂಕ್ ಮಲ್ತಿನ ಆಧಾರ್ ಕಾರ್ಡ್ ಬೋಡು"),
-    ]
-
-    for label, phrase in tulu_tests:
-        print(f"\n========= TEST: {label} =========")
-        print(f"Worker asks: {phrase}")
-        print("Reply:", chat_with_worker(phrase, language="Tulu"))
+    print("\n========= TEST 4: Tulu (pre-written) =========")
+    print(chat_with_worker("ಎಂಕ್ ಕೆಲಸ ಬೋಡು", language="Tulu"))

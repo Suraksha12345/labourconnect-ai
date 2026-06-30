@@ -7,7 +7,8 @@ from chatbot_agent import chat_with_worker
 
 app = Flask(__name__)
 
-# ─── Endpoint 1: Wage Advisor ───
+
+# Endpoint 1: Wage Advisor
 @app.route("/check_wage", methods=["POST"])
 def wage_endpoint():
     data = request.get_json()
@@ -18,18 +19,22 @@ def wage_endpoint():
     )
     return jsonify({"result": result})
 
-# ─── Endpoint 2: Job Matching ───
+
+# Endpoint 2: Job Matching
 @app.route("/match_jobs", methods=["POST"])
 def job_matching_endpoint():
     data = request.get_json()
     result = match_jobs(
         worker_skill=data.get("worker_skill"),
         worker_location=data.get("worker_location"),
-        
+        min_wage=data.get("min_wage", 0) or 0,
+        max_wage=data.get("max_wage", 0) or 0,
+        worker_experience=data.get("worker_experience", "") or "",
     )
     return jsonify({"result": result})
 
-# ─── Endpoint 3: Safety Check ───
+
+# Endpoint 3: Safety Check
 @app.route("/check_safety", methods=["POST"])
 def safety_endpoint():
     data = request.get_json()
@@ -37,7 +42,9 @@ def safety_endpoint():
         job_title=data.get("job_title"),
         job_description=data.get("job_description"),
         wage=data.get("wage"),
-        location=data.get("location")
+        location=data.get("location"),
+        contractor_phone=data.get("contractor_phone", "") or "",
+        contractor_name=data.get("contractor_name", "") or "",
     )
 
     score_match = re.search(r'TRUST SCORE:\s*(\d+)', raw_result)
@@ -50,18 +57,20 @@ def safety_endpoint():
         "reason": reason_match.group(1).strip() if reason_match else raw_result.strip()
     })
 
-# ─── Endpoint 4: Chatbot ───
+
+# Endpoint 4: Chatbot
 @app.route("/chat", methods=["POST"])
 def chat_endpoint():
     try:
         data = request.get_json(force=True)
         message = (data.get("message") or "").strip()
         language = data.get("language") or "auto"
+        worker_phone = data.get("worker_phone", "") or ""
 
         if not message:
             return jsonify({"reply": "Please type a message."})
 
-        reply = chat_with_worker(worker_message=message, language=language)
+        reply = chat_with_worker(worker_message=message, language=language, worker_phone=worker_phone)
 
         if not reply:
             reply = "Sorry, I didn't quite get that. Could you ask again?"
@@ -72,10 +81,12 @@ def chat_endpoint():
         print(f"[/chat] ERROR: {e}")
         return jsonify({"reply": "Sorry, I'm having trouble right now. Please try again in a moment."}), 200
 
-# ─── Health check ───
+
+# Health check
 @app.route("/", methods=["GET"])
 def home():
     return jsonify({"status": "LabourConnect AI backend is running!"})
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True, threaded=True, use_reloader=False)
