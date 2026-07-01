@@ -6,4 +6,3 @@ crewai-tools[mcp]
 firebase-admin
 gunicorn
 litellm
-crewai[litellm]
