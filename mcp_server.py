@@ -49,26 +49,21 @@ def _last10(raw):
 def list_jobs(
     skill: str = "",
     location: str = "",
-    min_wage: int = 0,
-    max_wage: int = 0,
 ) -> list[dict]:
     """
-    Fetch currently posted jobs from Firestore, with smart fallback
-    built in — call this ONCE with all known filters; it broadens the
-    search internally if there's no exact match, so the agent never
-    needs to call it again with different parameters.
+    Fetch currently posted jobs from Firestore with smart fallback.
+    Call this ONCE with skill and location — it handles broadening
+    the search internally if there's no exact match, so the agent
+    never needs to call it again with different parameters.
 
     Args:
         skill: The worker's skill (e.g. "Mason"). Empty = all skills.
         location: The worker's location (e.g. "Mangalore"). Empty = all locations.
-        min_wage: Minimum acceptable daily wage in rupees. 0 = no minimum.
-        max_wage: Maximum daily wage to consider in rupees. 0 = no maximum.
 
     Returns:
         A list of job dicts (title, skill, location, wage, startDate).
-        Tries an exact match on all given filters first; if none exist,
-        progressively relaxes wage filters, then skill, keeping location
-        last to drop; if still nothing, returns all posted jobs.
+        Tries exact skill+location match first; falls back to location
+        only, then all jobs, so there's always something to reason over.
     """
     jobs_ref = db.collection("jobs").stream()
     all_jobs = []
@@ -83,36 +78,15 @@ def list_jobs(
             "startDate": data.get("startDate", ""),
         })
 
-    def wage_of(job):
-        try:
-            return int(str(job["wage"]).strip())
-        except (ValueError, TypeError):
-            return None
-
     def matches_skill(job):
         return not skill or job["skill"].strip().lower() == skill.strip().lower()
 
     def matches_location(job):
         return not location or location.strip().lower() in job["location"].strip().lower()
 
-    def matches_wage(job):
-        w = wage_of(job)
-        if w is None:
-            return True
-        if min_wage and w < min_wage:
-            return False
-        if max_wage and w > max_wage:
-            return False
-        return True
-
-    exact = [j for j in all_jobs if matches_skill(j) and matches_location(j) and matches_wage(j)]
+    exact = [j for j in all_jobs if matches_skill(j) and matches_location(j)]
     if exact:
         return exact
-
-    if min_wage or max_wage:
-        no_wage_filter = [j for j in all_jobs if matches_skill(j) and matches_location(j)]
-        if no_wage_filter:
-            return no_wage_filter
 
     if location:
         location_only = [j for j in all_jobs if matches_location(j)]
