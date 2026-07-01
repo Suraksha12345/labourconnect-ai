@@ -11,10 +11,12 @@ from mcp import StdioServerParameters
 # ── Workaround for a known CrewAI bug (GitHub issue #5886) ──
 # CrewAI injects a "cache_breakpoint" property into messages, but only
 # the Anthropic provider knows how to strip it before sending. Groq
-# rejects it outright, causing every LLM call to fail. This disables
-# that injection entirely until CrewAI ships an official fix.
-import crewai.llms.cache as _crewai_cache
-_crewai_cache.mark_cache_breakpoint = lambda msg: msg
+# rejects it outright. This disables that injection safely.
+try:
+    import crewai.llms.cache as _crewai_cache
+    _crewai_cache.mark_cache_breakpoint = lambda msg: msg
+except (ImportError, AttributeError):
+    pass  # module path may differ across CrewAI versions — safe to skip
 
 # ── Where mcp_server.py actually runs ──
 # Locally on Windows: a SEPARATE venv (dashboard_venv) that has
