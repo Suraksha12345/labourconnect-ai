@@ -1,0 +1,8 @@
+flask
+python-dotenv
+groq
+crewai
+crewai-tools[mcp]
+firebase-admin
+gunicorn
+litellm
