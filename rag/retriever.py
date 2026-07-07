@@ -2,7 +2,7 @@ import os
 os.environ["HF_HUB_OFFLINE"] = "1"
 os.environ["TRANSFORMERS_OFFLINE"] = "1"
 
-from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_community.embeddings import FastEmbedEmbeddings
 from langchain_community.vectorstores import Chroma
 
 DB_DIR = os.path.join(os.path.dirname(__file__), "chroma_db")
@@ -12,7 +12,7 @@ _vectordb = None
 
 
 import os
-from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_community.embeddings import FastEmbedEmbeddings
 from langchain_community.vectorstores import Chroma
 
 DB_DIR = os.path.join(os.path.dirname(__file__), "chroma_db")
@@ -21,7 +21,7 @@ _vectordb = None
 def _get_db():
     global _vectordb
     if _vectordb is None:
-        embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+        embeddings = FastEmbedEmbeddings(model_name="BAAI/bge-small-en-v1.5")
         _vectordb = Chroma(persist_directory=DB_DIR, embedding_function=embeddings)
     return _vectordb
 
