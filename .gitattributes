@@ -1,0 +1,2 @@
+rag/fastembed_cache/** -text
+rag/chroma_db/** -text
