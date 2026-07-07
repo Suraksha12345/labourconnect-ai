@@ -28,8 +28,8 @@ SAFETY_BACKSTORY = (
 )
 
 
-async def _fetch_safety_data_via_mcp(job_title, contractor_phone, contractor_name):
-    """Fetch contractor history and reports from Firestore via MCP tools."""
+async def _fetch_safety_data_via_mcp(job_title, contractor_phone, contractor_name, job_description=""):
+    """Fetch contractor history, reports, and safety knowledge from Firestore + RAG via MCP tools."""
     server_params = StdioServerParameters(
         command=MCP_PYTHON,
         args=[MCP_SERVER_SCRIPT],
@@ -53,21 +53,24 @@ async def _fetch_safety_data_via_mcp(job_title, contractor_phone, contractor_nam
                     "contractor_phone": contractor_phone,
                 }
             )
+            knowledge = await session.call_tool(
+                "get_safety_knowledge",
+                arguments={
+                    "query": f"{job_title} {job_description} safety requirements",
+                    "category": "safety",
+                }
+            )
 
             history_data = json.loads(history.content[0].text) if history.content else {}
             reports_data = json.loads(reports.content[0].text) if reports.content else {}
-            return history_data, reports_data
-
+            knowledge_data = json.loads(knowledge.content[0].text) if knowledge.content else []
+            return history_data, reports_data, knowledge_data
 
 def check_job_safety(job_title, job_description, wage, location,
                      contractor_phone="", contractor_name=""):
-    """
-    Safety Check Agent: fetches contractor history and reports via MCP,
-    then asks Groq to assign a trust score.
-    """
     try:
-        history_data, reports_data = asyncio.run(
-            _fetch_safety_data_via_mcp(job_title, contractor_phone, contractor_name)
+        history_data, reports_data, knowledge_data = asyncio.run(
+            _fetch_safety_data_via_mcp(job_title, contractor_phone, contractor_name, job_description)
         )
         history_context = (
             f"Contractor has posted {history_data.get('jobs_posted_count', 0)} "
@@ -79,9 +82,16 @@ def check_job_safety(job_title, job_description, wage, location,
             if report_count > 0 else
             "No reports filed against this job or contractor."
         )
+        if knowledge_data:
+            safety_context = "Relevant safety guidelines:\n" + "\n".join(
+                f"- {k['content'][:200]}" for k in knowledge_data
+            )
+        else:
+            safety_context = "No specific safety guideline matched this job type."
     except Exception:
         history_context = "Contractor history unavailable."
         reports_context = "Report data unavailable."
+        safety_context = "Safety knowledge base unavailable."
 
     prompt = (
         f"Job Title: {job_title}\n"
@@ -89,7 +99,8 @@ def check_job_safety(job_title, job_description, wage, location,
         f"Wage: {wage}\n"
         f"Description: {job_description}\n"
         f"Contractor history: {history_context}\n"
-        f"Community reports: {reports_context}\n\n"
+        f"Community reports: {reports_context}\n"
+        f"{safety_context}\n\n"
         f"Analyze this job posting for fraud risk."
     )
 

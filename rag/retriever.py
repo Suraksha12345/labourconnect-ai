@@ -1,0 +1,37 @@
+import os
+os.environ["HF_HUB_OFFLINE"] = "1"
+os.environ["TRANSFORMERS_OFFLINE"] = "1"
+
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_community.vectorstores import Chroma
+
+DB_DIR = os.path.join(os.path.dirname(__file__), "chroma_db")
+_vectordb = None
+
+
+
+
+import os
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_community.vectorstores import Chroma
+
+DB_DIR = os.path.join(os.path.dirname(__file__), "chroma_db")
+_vectordb = None
+
+def _get_db():
+    global _vectordb
+    if _vectordb is None:
+        embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+        _vectordb = Chroma(persist_directory=DB_DIR, embedding_function=embeddings)
+    return _vectordb
+
+def search_knowledge_base(query: str, k: int = 3, category: str = None) -> str:
+    db = _get_db()
+    filter_dict = {"category": category} if category else None
+    results = db.similarity_search(query, k=k, filter=filter_dict)
+    if not results:
+        return "No relevant information found in knowledge base."
+    return "\n\n---\n\n".join(
+        f"[{r.metadata.get('category', 'general')} - {r.metadata.get('source_file', '')}]\n{r.page_content}"
+        for r in results
+    )

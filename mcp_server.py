@@ -23,6 +23,14 @@ import json
 import firebase_admin
 from firebase_admin import credentials, firestore
 from mcp.server.fastmcp import FastMCP
+from rag.retriever import search_knowledge_base
+
+os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
+os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+
+from rag.retriever import search_knowledge_base, _get_db
 
 if not firebase_admin._apps:
     service_account_json = os.environ.get("FIREBASE_SERVICE_ACCOUNT_JSON")
@@ -363,6 +371,57 @@ def get_government_schemes(query: str = "") -> list[dict]:
     ]
     return matches if matches else _GOVERNMENT_SCHEMES
 
+# ════════════════════════════════════════════════════════════
+# KNOWLEDGE BASE / RAG  (used by Safety Check + Chatbot)
+# ════════════════════════════════════════════════════════════
+
+@mcp.tool()
+def get_safety_knowledge(query: str, category: str = "") -> list[dict]:
+    """
+    Search LabourConnect's knowledge base (government schemes, labour
+    laws, safety guidelines, registration rules, FAQs, and platform
+    policies) for content relevant to a question. Use this whenever a
+    worker asks something that depends on real rules or facts rather
+    than general advice — e.g. wage law, scheme eligibility, safety
+    requirements, or registration steps.
+
+    Args:
+        query: The worker's question or topic, in plain language
+               (e.g. "hospitalisation assistance amount", "electrical
+               safety rules").
+        category: Optional filter to narrow the search. One of:
+                  "schemes", "laws", "safety", "registration", "faqs",
+                  "policies". Leave empty to search everything.
+
+    Returns:
+        A list of up to 3 dicts, each with category, source, and
+        content (the relevant text chunk). Empty list if nothing
+        relevant is found.
+    """
+    raw = search_knowledge_base(query, k=3, category=category or None)
+
+    if raw.startswith("No relevant information"):
+        return []
+
+    results = []
+    for block in raw.split("\n\n---\n\n"):
+        if block.startswith("[") and "]" in block:
+            header, content = block.split("]", 1)
+            cat_source = header.strip("[").split(" - ", 1)
+            results.append({
+                "category": cat_source[0].strip() if cat_source else "",
+                "source": cat_source[1].strip() if len(cat_source) > 1 else "",
+                "content": content.strip(),
+            })
+    return results
+
+
+# Pre-load the embedding model now, while stdout is still "ours" —
+# doing this on the first real tool call instead can print stray
+# output that corrupts the MCP stdio JSON-RPC stream and hangs the client.
+print("Warming up RAG embedding model...", file=__import__("sys").stderr)
+_get_db()
+print("RAG embedding model ready.", file=__import__("sys").stderr)
 
 if __name__ == "__main__":
     mcp.run(transport="stdio")

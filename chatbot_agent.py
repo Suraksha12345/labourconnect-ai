@@ -1,7 +1,8 @@
 """
 Chatbot Agent - MCP + Groq (Layer 4)
-Uses MCP tools to fetch worker profile, government schemes, and jobs
-from Firestore, then passes that real data to Groq for a helpful reply.
+Uses MCP tools to fetch worker profile, government schemes, jobs, and
+knowledge-base content (laws/safety/schemes/registration/policies) from
+Firestore + RAG, then passes that real data to Groq for a helpful reply.
 Tulu pre-written responses are unchanged.
 """
 
@@ -67,11 +68,15 @@ def _detect_intent(message):
     if any(w in msg for w in ["my skill", "my profile", "registered",
                                "my name", "my location", "ನನ್ನ", "मेरा"]):
         return "profile"
+    if any(w in msg for w in ["safety", "safe", "law", "rule", "register",
+                               "registration", "policy", "wage law", "minimum wage",
+                               "ಸುರಕ್ಷ", "ಕಾನೂನು", "सुरक्षा", "कानून"]):
+        return "knowledge"
     return "general"
 
 
-async def _fetch_chatbot_data_via_mcp(intent, worker_phone="", skill="", location=""):
-    """Fetch relevant data from Firestore via MCP based on what the worker asked."""
+async def _fetch_chatbot_data_via_mcp(intent, worker_phone="", skill="", location="", worker_message=""):
+    """Fetch relevant data from Firestore/RAG via MCP based on what the worker asked."""
     server_params = StdioServerParameters(
         command=MCP_PYTHON,
         args=[MCP_SERVER_SCRIPT],
@@ -102,6 +107,13 @@ async def _fetch_chatbot_data_via_mcp(intent, worker_phone="", skill="", locatio
                 )
                 return {"profile": json.loads(result.content[0].text) if result.content else {}}
 
+            elif intent == "knowledge":
+                result = await session.call_tool(
+                    "get_safety_knowledge",
+                    arguments={"query": worker_message, "category": ""}
+                )
+                return {"knowledge": json.loads(result.content[0].text) if result.content else []}
+
             return {}
 
 
@@ -119,12 +131,13 @@ def chat_with_worker(worker_message, language="auto", worker_phone=""):
     # Detect what data we need
     intent = _detect_intent(worker_message)
 
-    # Fetch real data from Firestore via MCP
+    # Fetch real data from Firestore/RAG via MCP
     mcp_context = ""
     try:
         data = asyncio.run(_fetch_chatbot_data_via_mcp(
             intent=intent,
             worker_phone=worker_phone,
+            worker_message=worker_message,
         ))
 
         if "jobs" in data and data["jobs"]:
@@ -149,6 +162,13 @@ def chat_with_worker(worker_message, language="auto", worker_phone=""):
                 f"Skill={p.get('skill')}, Location={p.get('location')}, "
                 f"Experience={p.get('experience')} years.\n"
             )
+
+        elif "knowledge" in data and data["knowledge"]:
+            knowledge_text = "\n".join([
+                f"- [{k['category']}] {k['content'][:150]}..."
+                for k in data["knowledge"][:3]
+            ])
+            mcp_context = f"\nRelevant rules/guidelines:\n{knowledge_text}\n"
     except Exception:
         pass  # If MCP fetch fails, just answer from general knowledge
 
@@ -177,3 +197,6 @@ if __name__ == "__main__":
 
     print("\nTEST 3: Tulu (pre-written)")
     print(chat_with_worker("ಎಂಕ್ ಕೆಲಸ ಬೋಡು", language="Tulu"))
+
+    print("\nTEST 4: Safety knowledge question")
+    print(chat_with_worker("What safety precautions for electrical work?", language="English"))
