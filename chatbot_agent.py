@@ -21,13 +21,21 @@ groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
 
 CHATBOT_ROLE = "LabourConnect Chatbot Agent"
 
-CHATBOT_BACKSTORY = (
-    "You are a friendly, helpful assistant inside LabourConnect, an app "
-    "that helps daily wage workers in rural Karnataka find jobs. "
-    "You can help with anything the worker asks. Keep answers short, "
-    "simple, and practical. Always reply in the SAME language the "
-    "worker used to ask the question."
-)
+def _build_chatbot_backstory(language):
+    lang_instruction = (
+        f"You MUST reply in {language} — never switch to Kannada, Hindi, or any "
+        f"other language, even if the retrieved context or knowledge base content "
+        f"is written in a different script. Translate any relevant facts into {language}."
+        if language and language.lower() not in ("auto", "")
+        else "Reply in the SAME language the worker used to ask the question."
+    )
+    return (
+        "You are a friendly, helpful assistant inside LabourConnect, an app "
+        "that helps daily wage workers in rural Karnataka find jobs. "
+        "You can help with anything the worker asks. Keep answers short, "
+        "simple, and practical. "
+        f"{lang_instruction}"
+    )
 
 TULU_RESPONSES = {
     "job_search": (
@@ -179,7 +187,7 @@ def chat_with_worker(worker_message, language="auto", worker_phone=""):
     response = groq_client.chat.completions.create(
         model="llama-3.3-70b-versatile",
         messages=[
-            {"role": "system", "content": CHATBOT_BACKSTORY},
+            {"role": "system", "content": _build_chatbot_backstory(language)},
             {"role": "user", "content": prompt}
         ]
     )
