@@ -3,6 +3,7 @@ from langchain_community.document_loaders import PyPDFLoader, TextLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import FastEmbedEmbeddings
 from langchain_community.vectorstores import Chroma
+os.environ["HF_HUB_DISABLE_SYMLINKS"] = "1"
 
 BASE_DIR = os.path.dirname(__file__)
 KB_DIR = os.path.join(BASE_DIR, "knowledge_base")
@@ -39,7 +40,8 @@ def build_index():
     chunks = splitter.split_documents(docs)
     print(f"Split into {len(chunks)} chunks")
 
-    embeddings = FastEmbedEmbeddings(model_name="BAAI/bge-small-en-v1.5")
+    FASTEMBED_CACHE = os.path.join(BASE_DIR, "fastembed_cache")
+    embeddings = FastEmbedEmbeddings(model_name="BAAI/bge-small-en-v1.5", cache_dir=FASTEMBED_CACHE)
 
     vectordb = Chroma.from_documents(
         documents=chunks,
