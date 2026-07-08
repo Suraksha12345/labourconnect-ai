@@ -120,7 +120,9 @@ async def _fetch_chatbot_data_via_mcp(intent, worker_phone="", skill="", locatio
                     "get_safety_knowledge",
                     arguments={"query": worker_message, "category": ""}
                 )
-                return {"knowledge": json.loads(result.content[0].text) if result.content else []}
+                raw_knowledge = json.loads(result.content[0].text) if result.content else []
+                knowledge_list = raw_knowledge if isinstance(raw_knowledge, list) else [raw_knowledge] if raw_knowledge else []
+                return {"knowledge": knowledge_list}
 
             return {}
 

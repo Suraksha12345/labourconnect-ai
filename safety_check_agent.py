@@ -63,7 +63,8 @@ async def _fetch_safety_data_via_mcp(job_title, contractor_phone, contractor_nam
 
             history_data = json.loads(history.content[0].text) if history.content else {}
             reports_data = json.loads(reports.content[0].text) if reports.content else {}
-            knowledge_data = json.loads(knowledge.content[0].text) if knowledge.content else []
+            raw_knowledge = json.loads(knowledge.content[0].text) if knowledge.content else []
+            knowledge_data = raw_knowledge if isinstance(raw_knowledge, list) else [raw_knowledge] if raw_knowledge else [] 
             return history_data, reports_data, knowledge_data
 
 def check_job_safety(job_title, job_description, wage, location,
