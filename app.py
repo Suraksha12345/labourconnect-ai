@@ -166,6 +166,61 @@ def chat_endpoint():
         return jsonify({"reply": "Sorry, I'm having trouble right now. Please try again in a moment."}), 200
 
 
+
+# ── Endpoint 5: Job Expiry (called by n8n on a schedule) ──
+@app.route("/api/jobs/expire", methods=["POST"])
+def expire_jobs():
+    from datetime import timedelta
+
+    EXPIRY_DAYS = 7  # jobs older than this and still open get expired
+    dry_run = request.args.get("dry_run", "false").lower() == "true"
+
+    try:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=EXPIRY_DAYS)
+        jobs_ref = db.collection("jobs")
+        jobs = jobs_ref.stream()
+
+        expired_count = 0
+        would_expire_titles = []
+
+        for job in jobs:
+            job_data = job.to_dict()
+
+            if job_data.get("status") == "expired":
+                continue
+
+            posted_at_str = job_data.get("postedAt")
+            if not posted_at_str:
+                continue
+
+            try:
+                posted_at = datetime.fromisoformat(posted_at_str)
+                if posted_at.tzinfo is None:
+                    posted_at = posted_at.replace(tzinfo=timezone.utc)
+            except ValueError:
+                continue
+
+            if posted_at < cutoff:
+                if dry_run:
+                    would_expire_titles.append(job_data.get("title", "Untitled"))
+                else:
+                    job.reference.update({"status": "expired"})
+                expired_count += 1
+
+        print(f"[job expiry] dry_run={dry_run} → {expired_count} jobs {'would be' if dry_run else ''} expired")
+
+        return jsonify({
+            "success": True,
+            "dry_run": dry_run,
+            "expired_count": expired_count,
+            "would_expire_titles": would_expire_titles if dry_run else None
+        })
+
+    except Exception as e:
+        print(f"[/api/jobs/expire] ERROR: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
 # ── Health check ──
 @app.route("/", methods=["GET"])
 def home():
