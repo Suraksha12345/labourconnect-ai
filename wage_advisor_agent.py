@@ -2,8 +2,7 @@
 Wage Advisor Agent - MCP + Groq (Layer 4 + Layer 5)
 Uses MCP tools to fetch real wage data from Firestore, plus RAG-based
 retrieval of Karnataka minimum wage law, then passes all of it to
-Groq for reasoning. Lighter than full CrewAI orchestration but still
-genuinely MCP-integrated for the data layer.
+Groq for reasoning.
 """
 import os
 import json
@@ -54,21 +53,16 @@ async def _fetch_wage_data_via_mcp(skill, location):
             benchmark_data = json.loads(benchmark.content[0].text) if benchmark.content else {}
             recent_data = json.loads(recent.content[0].text) if recent.content else {}
             raw_law = json.loads(law.content[0].text) if law.content else []
-            law_data = raw_law if isinstance(raw_law, list) else [raw_law] if raw_law else []   
+            law_data = raw_law if isinstance(raw_law, list) else [raw_law] if raw_law else []
             return benchmark_data, recent_data, law_data
 
 
 def check_wage(skill, location, offered_wage):
-    """
-    Wage Advisor Agent: fetches real wage data + minimum wage law via
-    MCP, then asks Groq to judge whether the offered wage is fair.
-    """
     try:
         benchmark_data, recent_data, law_data = asyncio.run(
             _fetch_wage_data_via_mcp(skill, location)
         )
     except Exception:
-        # If MCP fetch fails, fall back to static benchmarks
         key = skill.strip().lower()
         low, high = _WAGE_BENCHMARKS.get(key, (350, 550))
         benchmark_data = {"benchmark_low": low, "benchmark_high": high}
@@ -85,7 +79,6 @@ def check_wage(skill, location, offered_wage):
         )
     else:
         recent_context = "No recent postings found on LabourConnect for this skill/location."
-   
 
     if law_data:
         law_context = "Relevant Karnataka minimum wage law:\n" + "\n".join(

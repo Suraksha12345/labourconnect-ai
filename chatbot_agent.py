@@ -1,9 +1,9 @@
 """
-Chatbot Agent - MCP + Groq (Layer 4)
+Chatbot Agent - MCP + Groq (Layer 4 + Layer 5)
 Uses MCP tools to fetch worker profile, government schemes, jobs, and
-knowledge-base content (laws/safety/schemes/registration/policies) from
-Firestore + RAG, then passes that real data to Groq for a helpful reply.
-Tulu pre-written responses are unchanged.
+knowledge-base content (laws/safety/schemes/registration/policies)
+from Firestore + RAG, then passes that real data to Groq for a
+helpful reply. Tulu pre-written responses are unchanged.
 """
 
 import os
@@ -20,22 +20,6 @@ load_dotenv()
 groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
 
 CHATBOT_ROLE = "LabourConnect Chatbot Agent"
-
-def _build_chatbot_backstory(language):
-    lang_instruction = (
-        f"You MUST reply in {language} — never switch to Kannada, Hindi, or any "
-        f"other language, even if the retrieved context or knowledge base content "
-        f"is written in a different script. Translate any relevant facts into {language}."
-        if language and language.lower() not in ("auto", "")
-        else "Reply in the SAME language the worker used to ask the question."
-    )
-    return (
-        "You are a friendly, helpful assistant inside LabourConnect, an app "
-        "that helps daily wage workers in rural Karnataka find jobs. "
-        "You can help with anything the worker asks. Keep answers short, "
-        "simple, and practical. "
-        f"{lang_instruction}"
-    )
 
 TULU_RESPONSES = {
     "job_search": (
@@ -66,7 +50,6 @@ def detect_tulu_intent(message):
 
 
 def _detect_intent(message):
-    """Quickly detect what kind of data the chatbot might need."""
     msg = message.lower()
     if any(w in msg for w in ["job", "work", "ಕೆಲಸ", "काम", "mason", "painter"]):
         return "jobs"
@@ -84,7 +67,6 @@ def _detect_intent(message):
 
 
 async def _fetch_chatbot_data_via_mcp(intent, worker_phone="", skill="", location="", worker_message=""):
-    """Fetch relevant data from Firestore/RAG via MCP based on what the worker asked."""
     server_params = StdioServerParameters(
         command=MCP_PYTHON,
         args=[MCP_SERVER_SCRIPT],
@@ -127,21 +109,31 @@ async def _fetch_chatbot_data_via_mcp(intent, worker_phone="", skill="", locatio
             return {}
 
 
+def _build_chatbot_backstory(language):
+    lang_instruction = (
+        f"You MUST reply in {language} — never switch to Kannada, Hindi, or any "
+        f"other language, even if the retrieved context or knowledge base content "
+        f"is written in a different script. Translate any relevant facts into {language}."
+        if language and language.lower() not in ("auto", "")
+        else "Reply in the SAME language the worker used to ask the question."
+    )
+    return (
+        "You are a friendly, helpful assistant inside LabourConnect, an app "
+        "that helps daily wage workers in rural Karnataka find jobs. "
+        "You can help with anything the worker asks. Keep answers short, "
+        "simple, and practical. "
+        f"{lang_instruction}"
+    )
+
+
 def chat_with_worker(worker_message, language="auto", worker_phone=""):
-    """
-    Chatbot Agent: detects intent, fetches relevant real data via MCP
-    tools, then passes that context to Groq for a helpful reply.
-    Tulu pre-written responses are checked first (unchanged).
-    """
     if language == "Tulu":
         intent = detect_tulu_intent(worker_message)
         if intent and intent in TULU_RESPONSES:
             return TULU_RESPONSES[intent]
 
-    # Detect what data we need
     intent = _detect_intent(worker_message)
 
-    # Fetch real data from Firestore/RAG via MCP
     mcp_context = ""
     try:
         data = asyncio.run(_fetch_chatbot_data_via_mcp(
@@ -151,7 +143,7 @@ def chat_with_worker(worker_message, language="auto", worker_phone=""):
         ))
 
         if "jobs" in data and data["jobs"]:
-            jobs = data["jobs"][:3]  # Top 3 most relevant
+            jobs = data["jobs"][:3]
             jobs_text = "\n".join([
                 f"- {j['title']} at {j['location']}, ₹{j['wage']}/day"
                 for j in jobs
@@ -180,7 +172,7 @@ def chat_with_worker(worker_message, language="auto", worker_phone=""):
             ])
             mcp_context = f"\nRelevant rules/guidelines:\n{knowledge_text}\n"
     except Exception:
-        pass  # If MCP fetch fails, just answer from general knowledge
+        pass
 
     prompt = worker_message
     if mcp_context:
@@ -210,3 +202,9 @@ if __name__ == "__main__":
 
     print("\nTEST 4: Safety knowledge question")
     print(chat_with_worker("What safety precautions for electrical work?", language="English"))
+
+    print("\nTEST 5: Kannada safety question")
+    print(chat_with_worker("ವಿದ್ಯುತ್ ಕೆಲಸಕ್ಕೆ ಸುರಕ್ಷತಾ ಕ್ರಮಗಳು ಏನು?", language="Kannada"))
+
+    print("\nTEST 6: Hindi safety question")
+    print(chat_with_worker("बिजली के काम के लिए सुरक्षा उपाय क्या हैं?", language="Hindi"))

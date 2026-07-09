@@ -1,4 +1,5 @@
 import os
+
 from langchain_community.document_loaders import PyPDFLoader, TextLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import FastEmbedEmbeddings
@@ -43,11 +44,12 @@ def build_index():
     FASTEMBED_CACHE = os.path.join(BASE_DIR, "fastembed_cache")
     embeddings = FastEmbedEmbeddings(model_name="BAAI/bge-small-en-v1.5", cache_dir=FASTEMBED_CACHE)
 
+    
     vectordb = Chroma.from_documents(
-        documents=chunks,
-        embedding=embeddings,
-        persist_directory=DB_DIR,
-    )
+    documents=chunks,
+    embedding=embeddings,
+    persist_directory=DB_DIR,
+)
     vectordb.persist()
     print(f"Index built at {DB_DIR} with categories: {CATEGORIES}")
 
