@@ -1,20 +1,14 @@
 """
-Chatbot Agent - MCP + Groq (Layer 4 + Layer 5)
-Uses MCP tools to fetch worker profile, government schemes, jobs, and
-knowledge-base content (laws/safety/schemes/registration/policies)
-from Firestore + RAG, then passes that real data to Groq for a
-helpful reply. Tulu pre-written responses are unchanged.
+Chatbot Agent - Persistent MCP + Groq (Layer 4 + Layer 5)
+Uses a persistent MCP connection (started once at Flask boot) to
+fetch jobs/schemes/profile/knowledge — no per-request subprocess
+spawn, no reloading the RAG model each call. Tulu pre-written
+responses are unchanged.
 """
-
 import os
-import json
 from dotenv import load_dotenv
 from groq import Groq
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
-import asyncio
-
-from mcp_connection import MCP_PYTHON, MCP_SERVER_SCRIPT
+from mcp_persistent import get_client
 
 load_dotenv()
 groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
@@ -66,47 +60,29 @@ def _detect_intent(message):
     return "general"
 
 
-async def _fetch_chatbot_data_via_mcp(intent, worker_phone="", skill="", location="", worker_message=""):
-    server_params = StdioServerParameters(
-        command=MCP_PYTHON,
-        args=[MCP_SERVER_SCRIPT],
-        env=os.environ.copy(),
-    )
-    async with stdio_client(server_params) as (read, write):
-        async with ClientSession(read, write) as session:
-            await session.initialize()
+def _fetch_chatbot_data(intent, worker_phone="", skill="", location="", worker_message=""):
+    client = get_client()
 
-            if intent == "jobs":
-                result = await session.call_tool(
-                    "list_jobs",
-                    arguments={"skill": skill, "location": location}
-                )
-                return {"jobs": json.loads(result.content[0].text) if result.content else []}
+    if intent == "jobs":
+        jobs = client.call_tool("list_jobs", {"skill": skill, "location": location}) or []
+        return {"jobs": jobs}
 
-            elif intent == "schemes":
-                result = await session.call_tool(
-                    "get_government_schemes",
-                    arguments={"query": ""}
-                )
-                return {"schemes": json.loads(result.content[0].text) if result.content else []}
+    elif intent == "schemes":
+        schemes = client.call_tool("get_government_schemes", {"query": ""}) or []
+        return {"schemes": schemes}
 
-            elif intent == "profile" and worker_phone:
-                result = await session.call_tool(
-                    "get_worker_profile",
-                    arguments={"phone": worker_phone}
-                )
-                return {"profile": json.loads(result.content[0].text) if result.content else {}}
+    elif intent == "profile" and worker_phone:
+        profile = client.call_tool("get_worker_profile", {"phone": worker_phone}) or {}
+        return {"profile": profile}
 
-            elif intent == "knowledge":
-                result = await session.call_tool(
-                    "get_safety_knowledge",
-                    arguments={"query": worker_message, "category": ""}
-                )
-                raw_knowledge = json.loads(result.content[0].text) if result.content else []
-                knowledge_list = raw_knowledge if isinstance(raw_knowledge, list) else [raw_knowledge] if raw_knowledge else []
-                return {"knowledge": knowledge_list}
+    elif intent == "knowledge":
+        raw_knowledge = client.call_tool("get_safety_knowledge", {
+            "query": worker_message, "category": ""
+        })
+        knowledge_list = raw_knowledge if isinstance(raw_knowledge, list) else [raw_knowledge] if raw_knowledge else []
+        return {"knowledge": knowledge_list}
 
-            return {}
+    return {}
 
 
 def _build_chatbot_backstory(language):
@@ -133,14 +109,12 @@ def chat_with_worker(worker_message, language="auto", worker_phone=""):
             return TULU_RESPONSES[intent]
 
     intent = _detect_intent(worker_message)
-
     mcp_context = ""
+
     try:
-        data = asyncio.run(_fetch_chatbot_data_via_mcp(
-            intent=intent,
-            worker_phone=worker_phone,
-            worker_message=worker_message,
-        ))
+        data = _fetch_chatbot_data(
+            intent=intent, worker_phone=worker_phone, worker_message=worker_message
+        )
 
         if "jobs" in data and data["jobs"]:
             jobs = data["jobs"][:3]
@@ -189,6 +163,7 @@ def chat_with_worker(worker_message, language="auto", worker_phone=""):
 
 
 if __name__ == "__main__":
+    get_client().start()
     print(f"Agent: {CHATBOT_ROLE}")
 
     print("\nTEST 1: English job search")
@@ -202,9 +177,3 @@ if __name__ == "__main__":
 
     print("\nTEST 4: Safety knowledge question")
     print(chat_with_worker("What safety precautions for electrical work?", language="English"))
-
-    print("\nTEST 5: Kannada safety question")
-    print(chat_with_worker("ವಿದ್ಯುತ್ ಕೆಲಸಕ್ಕೆ ಸುರಕ್ಷತಾ ಕ್ರಮಗಳು ಏನು?", language="Kannada"))
-
-    print("\nTEST 6: Hindi safety question")
-    print(chat_with_worker("बिजली के काम के लिए सुरक्षा उपाय क्या हैं?", language="Hindi"))

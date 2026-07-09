@@ -1,17 +1,13 @@
 """
-Wage Advisor Agent - MCP + Groq (Layer 4 + Layer 5)
-Uses MCP tools to fetch real wage data from Firestore, plus RAG-based
-retrieval of Karnataka minimum wage law, then passes all of it to
-Groq for reasoning.
+Wage Advisor Agent - Persistent MCP + Groq (Layer 4 + Layer 5)
+Uses a persistent MCP connection (started once at Flask boot) to
+fetch wage data and minimum wage law — no per-request subprocess
+spawn, no reloading the RAG model each call.
 """
 import os
-import json
 from dotenv import load_dotenv
 from groq import Groq
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
-import asyncio
-from mcp_connection import MCP_PYTHON, MCP_SERVER_SCRIPT
+from mcp_persistent import get_client
 
 load_dotenv()
 groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
@@ -23,45 +19,26 @@ _WAGE_BENCHMARKS = {
 }
 
 
-async def _fetch_wage_data_via_mcp(skill, location):
-    """Fetch benchmark wages, recent postings, and minimum wage law via MCP tools."""
-    server_params = StdioServerParameters(
-        command=MCP_PYTHON,
-        args=[MCP_SERVER_SCRIPT],
-        env=os.environ.copy(),
-    )
-    async with stdio_client(server_params) as (read, write):
-        async with ClientSession(read, write) as session:
-            await session.initialize()
-
-            benchmark = await session.call_tool(
-                "get_wage_data",
-                arguments={"skill": skill, "location": location}
-            )
-            recent = await session.call_tool(
-                "get_recent_wages",
-                arguments={"skill": skill, "location": location}
-            )
-            law = await session.call_tool(
-                "get_safety_knowledge",
-                arguments={
-                    "query": f"minimum wage law {skill} Karnataka zone skill category",
-                    "category": "laws",
-                }
-            )
-
-            benchmark_data = json.loads(benchmark.content[0].text) if benchmark.content else {}
-            recent_data = json.loads(recent.content[0].text) if recent.content else {}
-            raw_law = json.loads(law.content[0].text) if law.content else []
-            law_data = raw_law if isinstance(raw_law, list) else [raw_law] if raw_law else []
-            return benchmark_data, recent_data, law_data
+def _fetch_wage_data(skill, location):
+    """Fetch benchmark wages, recent postings, and minimum wage law via persistent MCP."""
+    client = get_client()
+    benchmark_data = client.call_tool("get_wage_data", {
+        "skill": skill, "location": location
+    }) or {}
+    recent_data = client.call_tool("get_recent_wages", {
+        "skill": skill, "location": location
+    }) or {}
+    raw_law = client.call_tool("get_safety_knowledge", {
+        "query": f"minimum wage law {skill} Karnataka zone skill category",
+        "category": "laws",
+    })
+    law_data = raw_law if isinstance(raw_law, list) else [raw_law] if raw_law else []
+    return benchmark_data, recent_data, law_data
 
 
 def check_wage(skill, location, offered_wage):
     try:
-        benchmark_data, recent_data, law_data = asyncio.run(
-            _fetch_wage_data_via_mcp(skill, location)
-        )
+        benchmark_data, recent_data, law_data = _fetch_wage_data(skill, location)
     except Exception:
         key = skill.strip().lower()
         low, high = _WAGE_BENCHMARKS.get(key, (350, 550))
@@ -108,5 +85,6 @@ def check_wage(skill, location, offered_wage):
 
 
 if __name__ == "__main__":
-    print("Wage Advisor Agent (MCP + Groq + RAG)")
+    get_client().start()
+    print("Wage Advisor Agent (Persistent MCP + Groq + RAG)")
     print(check_wage("Mason", "Mangalore", 500))

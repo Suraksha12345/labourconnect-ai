@@ -12,6 +12,8 @@ from wage_advisor_agent import check_wage
 from job_matching_agent import match_jobs
 from safety_check_agent import check_job_safety
 from chatbot_agent import chat_with_worker
+from mcp_persistent import get_client
+get_client().start()
 
 app = Flask(__name__)
 

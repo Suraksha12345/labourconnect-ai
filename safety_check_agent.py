@@ -1,19 +1,13 @@
 """
-Safety Check Agent - MCP + Groq (Layer 4 + Layer 5)
-Uses MCP tools to fetch contractor history, job reports, and safety
-knowledge (RAG) from Firestore/ChromaDB, then passes that data to
-Groq for fraud analysis.
+Safety Check Agent - Persistent MCP + Groq (Layer 4 + Layer 5)
+Uses a persistent MCP connection (started once at Flask boot) to
+fetch contractor history, reports, and safety knowledge — no
+per-request subprocess spawn, no reloading the RAG model each call.
 """
-
 import os
-import json
 from dotenv import load_dotenv
 from groq import Groq
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
-import asyncio
-
-from mcp_connection import MCP_PYTHON, MCP_SERVER_SCRIPT
+from mcp_persistent import get_client
 
 load_dotenv()
 groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
@@ -29,51 +23,26 @@ SAFETY_BACKSTORY = (
 )
 
 
-async def _fetch_safety_data_via_mcp(job_title, contractor_phone, contractor_name, job_description=""):
-    """Fetch contractor history, reports, and safety knowledge from Firestore + RAG via MCP tools."""
-    server_params = StdioServerParameters(
-        command=MCP_PYTHON,
-        args=[MCP_SERVER_SCRIPT],
-        env=os.environ.copy(),
-    )
-    async with stdio_client(server_params) as (read, write):
-        async with ClientSession(read, write) as session:
-            await session.initialize()
-
-            history = await session.call_tool(
-                "get_contractor_history",
-                arguments={
-                    "contractor_phone": contractor_phone,
-                    "contractor_name": contractor_name,
-                }
-            )
-            reports = await session.call_tool(
-                "get_job_reports",
-                arguments={
-                    "job_title": job_title,
-                    "contractor_phone": contractor_phone,
-                }
-            )
-            knowledge = await session.call_tool(
-                "get_safety_knowledge",
-                arguments={
-                    "query": f"{job_title} {job_description} safety requirements",
-                    "category": "safety",
-                }
-            )
-
-            history_data = json.loads(history.content[0].text) if history.content else {}
-            reports_data = json.loads(reports.content[0].text) if reports.content else {}
-            raw_knowledge = json.loads(knowledge.content[0].text) if knowledge.content else []
-            knowledge_data = raw_knowledge if isinstance(raw_knowledge, list) else [raw_knowledge] if raw_knowledge else []
-            return history_data, reports_data, knowledge_data
+def _fetch_safety_data(job_title, contractor_phone, contractor_name, job_description=""):
+    client = get_client()
+    history_data = client.call_tool("get_contractor_history", {
+        "contractor_phone": contractor_phone, "contractor_name": contractor_name
+    }) or {}
+    reports_data = client.call_tool("get_job_reports", {
+        "job_title": job_title, "contractor_phone": contractor_phone
+    }) or {}
+    raw_knowledge = client.call_tool("get_safety_knowledge", {
+        "query": f"{job_title} {job_description} safety requirements", "category": "safety"
+    })
+    knowledge_data = raw_knowledge if isinstance(raw_knowledge, list) else [raw_knowledge] if raw_knowledge else []
+    return history_data, reports_data, knowledge_data
 
 
 def check_job_safety(job_title, job_description, wage, location,
                      contractor_phone="", contractor_name=""):
     try:
-        history_data, reports_data, knowledge_data = asyncio.run(
-            _fetch_safety_data_via_mcp(job_title, contractor_phone, contractor_name, job_description)
+        history_data, reports_data, knowledge_data = _fetch_safety_data(
+            job_title, contractor_phone, contractor_name, job_description
         )
         history_context = (
             f"Contractor has posted {history_data.get('jobs_posted_count', 0)} "
@@ -118,7 +87,8 @@ def check_job_safety(job_title, job_description, wage, location,
 
 
 if __name__ == "__main__":
-    print("Safety Check Agent (MCP + Groq)")
+    get_client().start()
+    print("Safety Check Agent (Persistent MCP + Groq + RAG)")
     print(check_job_safety(
         job_title="5 Masons needed",
         job_description="Need 5 masons for 2-storey construction. Daily payment.",
