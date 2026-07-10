@@ -223,6 +223,57 @@ def expire_jobs():
         return jsonify({"success": False, "error": str(e)}), 500
 
 
+# ── Endpoint 6: Government Scheme Reminder (called by n8n on a schedule) ──
+@app.route("/api/schemes/remind", methods=["POST"])
+def scheme_reminder():
+    dry_run = request.args.get("dry_run", "false").lower() == "true"
+
+    try:
+        workers = db.collection("workers").stream()
+
+        reminder_text = (
+            "Reminder: You may be eligible for KBOCWWB welfare schemes "
+            "(e.g. education assistance, medical aid). Open AI Help and "
+            "ask about government schemes to check your eligibility."
+        )
+
+        notified_count = 0
+        notified_names = []
+
+        for worker in workers:
+            worker_data = worker.to_dict()
+            phone = worker_data.get("phone", "")
+            name = worker_data.get("name", "Worker")
+
+            if not phone:
+                continue
+
+            if not dry_run:
+                db.collection("notifications").add({
+                    "workerPhone": phone,
+                    "type": "scheme_reminder",
+                    "message": reminder_text,
+                    "createdAt": datetime.now(timezone.utc).isoformat(),
+                    "read": False,
+                })
+
+            notified_count += 1
+            notified_names.append(name)
+
+        print(f"[scheme reminder] dry_run={dry_run} → {notified_count} workers")
+
+        return jsonify({
+            "success": True,
+            "dry_run": dry_run,
+            "notified_count": notified_count,
+            "notified_names": notified_names if dry_run else None
+        })
+
+    except Exception as e:
+        print(f"[/api/schemes/remind] ERROR: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
 # ── Health check ──
 @app.route("/", methods=["GET"])
 def home():
