@@ -273,6 +273,61 @@ def scheme_reminder():
         print(f"[/api/schemes/remind] ERROR: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
 
+# ── Endpoint 7: Feedback Collection Trigger (called by n8n on a schedule) ──
+@app.route("/api/jobs/request-feedback", methods=["POST"])
+def request_feedback():
+    dry_run = request.args.get("dry_run", "false").lower() == "true"
+
+    try:
+        completed_jobs = db.collection("jobs").where("status", "==", "completed").stream()
+
+        requested_count = 0
+        requested_titles = []
+
+        for job in completed_jobs:
+            job_data = job.to_dict()
+            job_id = job.id
+            job_title = job_data.get("title", "Untitled")
+
+            if job_data.get("feedbackRequested"):
+                continue
+
+            applications = db.collection("applications").where("jobId", "==", job_id).where("status", "==", "completed").stream()
+
+            for app_doc in applications:
+                app_data = app_doc.to_dict()
+                worker_phone = app_data.get("workerPhone", "")
+                if not worker_phone:
+                    continue
+
+                if not dry_run:
+                    db.collection("notifications").add({
+                        "workerPhone": worker_phone,
+                        "type": "feedback_request",
+                        "message": f"How was your experience with '{job_title}'? Tap to share feedback.",
+                        "jobId": job_id,
+                        "createdAt": datetime.now(timezone.utc).isoformat(),
+                        "read": False,
+                    })
+
+            if not dry_run:
+                job.reference.update({"feedbackRequested": True})
+
+            requested_count += 1
+            requested_titles.append(job_title)
+
+        print(f"[feedback request] dry_run={dry_run} → {requested_count} jobs")
+
+        return jsonify({
+            "success": True,
+            "dry_run": dry_run,
+            "requested_count": requested_count,
+            "requested_titles": requested_titles if dry_run else None
+        })
+
+    except Exception as e:
+        print(f"[/api/jobs/request-feedback] ERROR: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
 
 # ── Health check ──
 @app.route("/", methods=["GET"])
