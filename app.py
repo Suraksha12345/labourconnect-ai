@@ -550,6 +550,83 @@ def alert_admin_of_reports():
     except Exception as e:
         print(f"[/api/reports/alert-admin] ERROR: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
+    
+# ── Endpoint 11: Payment Reminder (called by n8n on a schedule) ──
+@app.route("/api/payments/remind", methods=["POST"])
+def payment_reminder():
+    from datetime import timedelta
+
+    dry_run = request.args.get("dry_run", "false").lower() == "true"
+    GRACE_DAYS = 2
+
+    try:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=GRACE_DAYS)
+        applications = db.collection("applications").where("status", "==", "completed").stream()
+
+        reminded_count = 0
+        reminded_summary = []
+
+        for app_doc in applications:
+            app_data = app_doc.to_dict()
+
+            if app_data.get("paid"):
+                continue
+            if app_data.get("paymentReminderSent"):
+                continue
+
+            completed_at_str = app_data.get("completedAt")
+            if not completed_at_str:
+                continue
+
+            try:
+                completed_at = datetime.fromisoformat(completed_at_str)
+                if completed_at.tzinfo is None:
+                    completed_at = completed_at.replace(tzinfo=timezone.utc)
+            except ValueError:
+                continue
+
+            if completed_at >= cutoff:
+                continue  # still within grace period
+
+            job_id = app_data.get("jobId", "")
+            job_title = app_data.get("jobTitle", "Untitled job")
+
+            contractor_phone = ""
+            if job_id:
+                job_doc = db.collection("jobs").document(job_id).get()
+                if job_doc.exists:
+                    contractor_phone = job_doc.to_dict().get("contractorPhone", "")
+
+            if not contractor_phone:
+                continue
+
+            if not dry_run:
+                db.collection("notifications").add({
+                    "workerPhone": contractor_phone,
+                    "type": "payment_reminder",
+                    "message": f"Reminder: Payment is pending for '{job_title}'. Please pay the worker if not already done.",
+                    "jobId": job_id,
+                    "createdAt": datetime.now(timezone.utc).isoformat(),
+                    "read": False,
+                })
+                app_doc.reference.update({"paymentReminderSent": True})
+
+            reminded_count += 1
+            reminded_summary.append(f"{job_title} → contractor {contractor_phone}")
+
+        print(f"[payment reminder] dry_run={dry_run} → {reminded_count} reminders")
+
+        return jsonify({
+            "success": True,
+            "dry_run": dry_run,
+            "reminded_count": reminded_count,
+            "reminded_summary": reminded_summary if dry_run else None
+        })
+
+    except Exception as e:
+        print(f"[/api/payments/remind] ERROR: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
 
 # ── Health check ──
 @app.route("/", methods=["GET"])
