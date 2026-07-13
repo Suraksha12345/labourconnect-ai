@@ -500,6 +500,56 @@ def kyc_scan():
     except Exception as e:
         print(f"[/api/kyc/scan] ERROR: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
+    
+
+# ── Endpoint 10: Fraud Alert to Admin (called by n8n on a schedule) ──
+ADMIN_PHONE = "1234567890"
+
+@app.route("/api/reports/alert-admin", methods=["POST"])
+def alert_admin_of_reports():
+    dry_run = request.args.get("dry_run", "false").lower() == "true"
+
+    try:
+        reports = db.collection("reports").stream()
+
+        alerted_count = 0
+        alerted_summary = []
+
+        for report in reports:
+            report_data = report.to_dict()
+
+            if report_data.get("alertSent"):
+                continue
+
+            job_title = report_data.get("jobTitle", "Unknown job")
+            reason = report_data.get("reason", "No reason given")
+
+            if not dry_run:
+                db.collection("notifications").add({
+                    "workerPhone": ADMIN_PHONE,
+                    "type": "fraud_alert",
+                    "message": f"⚠️ New report on '{job_title}': {reason}",
+                    "reportId": report.id,
+                    "createdAt": datetime.now(timezone.utc).isoformat(),
+                    "read": False,
+                })
+                report.reference.update({"alertSent": True})
+
+            alerted_count += 1
+            alerted_summary.append(f"{job_title} — {reason}")
+
+        print(f"[fraud alert] dry_run={dry_run} → {alerted_count} reports alerted")
+
+        return jsonify({
+            "success": True,
+            "dry_run": dry_run,
+            "alerted_count": alerted_count,
+            "alerted_summary": alerted_summary if dry_run else None
+        })
+
+    except Exception as e:
+        print(f"[/api/reports/alert-admin] ERROR: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
 
 # ── Health check ──
 @app.route("/", methods=["GET"])
