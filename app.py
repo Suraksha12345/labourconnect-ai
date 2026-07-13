@@ -397,6 +397,109 @@ def notify_matching_workers():
     except Exception as e:
         print(f"[/api/jobs/notify-matches] ERROR: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
+    
+
+# ── Endpoint 9: KYC Scan (format validation + duplicate check) ──
+@app.route("/api/kyc/scan", methods=["POST"])
+def kyc_scan():
+    dry_run = request.args.get("dry_run", "false").lower() == "true"
+
+    try:
+        aadhaar_pattern = re.compile(r'^\d{4}\s?\d{4}\s?\d{4}$')
+        pan_pattern = re.compile(r'^[A-Z]{5}\d{4}[A-Z]$')
+        dl_pattern = re.compile(r'^[A-Z]{2}\d{2}\s?\d{4,11}$')
+
+        def id_format_valid(govt_id):
+            cleaned = govt_id.strip().upper()
+            if aadhaar_pattern.match(cleaned):
+                return True
+            if pan_pattern.match(cleaned):
+                return True
+            if dl_pattern.match(cleaned):
+                return True
+            return False
+
+        workers = list(db.collection("workers").stream())
+        contractors = list(db.collection("contractors").stream())
+
+        # Build a map of govtId -> list of (collection, doc_id, phone) to find duplicates
+        id_map = {}
+        all_people = []
+
+        for doc in workers:
+            data = doc.to_dict()
+            govt_id = (data.get("govtId") or "").strip()
+            all_people.append(("workers", doc.id, data, govt_id))
+            if govt_id:
+                id_map.setdefault(govt_id, []).append(("workers", doc.id))
+
+        for doc in contractors:
+            data = doc.to_dict()
+            govt_id = (data.get("govtId") or "").strip()
+            all_people.append(("contractors", doc.id, data, govt_id))
+            if govt_id:
+                id_map.setdefault(govt_id, []).append(("contractors", doc.id))
+
+        flagged_count = 0
+        pending_count = 0
+        summary = []
+
+        for collection_name, doc_id, data, govt_id in all_people:
+            # Skip if already reviewed (verified or already flagged) to avoid re-processing every run
+            if data.get("kycStatus") in ("verified", "flagged"):
+                continue
+
+            phone = data.get("phone", "")
+            name = data.get("name", "Unknown")
+
+            is_duplicate = govt_id and len(id_map.get(govt_id, [])) > 1
+            is_valid_format = govt_id and id_format_valid(govt_id)
+
+            if not govt_id:
+                new_status = "flagged"
+                reason = "No government ID provided"
+            elif is_duplicate:
+                new_status = "flagged"
+                reason = "Duplicate ID detected"
+            elif not is_valid_format:
+                new_status = "flagged"
+                reason = "Invalid ID format"
+            else:
+                new_status = "pending_review"
+                reason = "Format valid, awaiting admin verification"
+
+            if not dry_run:
+                db.collection(collection_name).document(doc_id).update({"kycStatus": new_status})
+                if phone:
+                    db.collection("notifications").add({
+                        "workerPhone": phone,
+                        "type": "kyc_update",
+                        "message": f"KYC status update: {reason}." if new_status == "flagged"
+                                   else "Your KYC documents are under review.",
+                        "createdAt": datetime.now(timezone.utc).isoformat(),
+                        "read": False,
+                    })
+
+            if new_status == "flagged":
+                flagged_count += 1
+            else:
+                pending_count += 1
+
+            summary.append(f"{name} ({collection_name}) → {new_status}: {reason}")
+
+        print(f"[kyc scan] dry_run={dry_run} → {pending_count} pending, {flagged_count} flagged")
+
+        return jsonify({
+            "success": True,
+            "dry_run": dry_run,
+            "pending_count": pending_count,
+            "flagged_count": flagged_count,
+            "summary": summary if dry_run else None
+        })
+
+    except Exception as e:
+        print(f"[/api/kyc/scan] ERROR: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
 
 # ── Health check ──
 @app.route("/", methods=["GET"])
