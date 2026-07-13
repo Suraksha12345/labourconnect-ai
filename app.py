@@ -329,6 +329,75 @@ def request_feedback():
         print(f"[/api/jobs/request-feedback] ERROR: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
 
+
+# ── Endpoint 8: Job Notification to Matching Workers (called by n8n on a schedule) ──
+@app.route("/api/jobs/notify-matches", methods=["POST"])
+def notify_matching_workers():
+    dry_run = request.args.get("dry_run", "false").lower() == "true"
+
+    try:
+        jobs = db.collection("jobs").stream()
+        all_workers = list(db.collection("workers").stream())
+
+        notified_total = 0
+        matched_summary = []
+
+        for job in jobs:
+            job_data = job.to_dict()
+
+            # Skip jobs already announced, or expired/completed ones
+            if job_data.get("notifiedMatches"):
+                continue
+            if job_data.get("status") in ("expired", "completed"):
+                continue
+
+            job_skill = (job_data.get("skill") or "").strip().lower()
+            job_title = job_data.get("title", "Untitled")
+            if not job_skill:
+                continue
+
+            matched_workers = []
+            for worker in all_workers:
+                worker_data = worker.to_dict()
+                worker_skills = worker_data.get("skills", [])
+                if not isinstance(worker_skills, list):
+                    continue
+
+                normalized_skills = [str(s).strip().lower() for s in worker_skills]
+                if job_skill in normalized_skills:
+                    matched_workers.append(worker_data.get("phone", ""))
+
+            if matched_workers:
+                if not dry_run:
+                    for phone in matched_workers:
+                        if not phone:
+                            continue
+                        db.collection("notifications").add({
+                            "workerPhone": phone,
+                            "type": "job_match",
+                            "message": f"New job matching your skills: '{job_title}'. Check it out!",
+                            "jobId": job.id,
+                            "createdAt": datetime.now(timezone.utc).isoformat(),
+                            "read": False,
+                        })
+                    job.reference.update({"notifiedMatches": True})
+
+                notified_total += len(matched_workers)
+                matched_summary.append(f"{job_title} → {len(matched_workers)} workers")
+
+        print(f"[job match notify] dry_run={dry_run} → {notified_total} notifications")
+
+        return jsonify({
+            "success": True,
+            "dry_run": dry_run,
+            "notified_total": notified_total,
+            "matched_summary": matched_summary if dry_run else None
+        })
+
+    except Exception as e:
+        print(f"[/api/jobs/notify-matches] ERROR: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
 # ── Health check ──
 @app.route("/", methods=["GET"])
 def home():
