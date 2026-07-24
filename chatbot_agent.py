@@ -5,6 +5,7 @@ fetch jobs/schemes/profile/knowledge — no per-request subprocess
 spawn, no reloading the RAG model each call. Tulu pre-written
 responses are unchanged.
 """
+
 import os
 from dotenv import load_dotenv
 from groq import Groq
@@ -31,6 +32,30 @@ TULU_RESPONSES = {
         "ಒತ್ತುಲೆ."
     ),
 }
+
+
+# ════════════════════════════════════════════════════════════
+# NAVIGATION INTENT (new — for chatbot-driven page navigation)
+# ════════════════════════════════════════════════════════════
+
+NAVIGATION_KEYWORDS = {
+    "home": ["home page", "home screen", "go home", "find jobs", "job listings"],
+    "my_jobs": ["my jobs", "my applications", "applied jobs", "jobs i applied", "my applied"],
+    "ai_help": ["ai help", "chatbot", "assistant page"],
+    "profile": ["my profile", "profile page", "my account", "edit profile"],
+}
+
+NAVIGATION_TAB_INDEX = {"home": 0, "my_jobs": 1, "ai_help": 2, "profile": 3}
+
+
+def detect_navigation_intent(message):
+    """Returns a tab index (0-3) if the message is asking to navigate
+    somewhere in the app, else None."""
+    msg = message.lower()
+    for target, keywords in NAVIGATION_KEYWORDS.items():
+        if any(kw in msg for kw in keywords):
+            return NAVIGATION_TAB_INDEX[target]
+    return None
 
 
 def detect_tulu_intent(message):
@@ -102,11 +127,16 @@ def _build_chatbot_backstory(language):
     )
 
 
-def chat_with_worker(worker_message, language="auto", worker_phone=""):
+def chat_with_worker(worker_message, language="auto", worker_phone="", return_context=False, return_navigation=False):
+    nav_target = detect_navigation_intent(worker_message)
+
     if language == "Tulu":
         intent = detect_tulu_intent(worker_message)
         if intent and intent in TULU_RESPONSES:
-            return TULU_RESPONSES[intent]
+            reply = TULU_RESPONSES[intent]
+            if return_navigation:
+                return reply, nav_target
+            return (reply, "") if return_context else reply
 
     intent = _detect_intent(worker_message)
     mcp_context = ""
@@ -159,7 +189,11 @@ def chat_with_worker(worker_message, language="auto", worker_phone=""):
             {"role": "user", "content": prompt}
         ]
     )
-    return response.choices[0].message.content
+
+    reply = response.choices[0].message.content
+    if return_navigation:
+        return reply, nav_target
+    return (reply, mcp_context) if return_context else reply
 
 
 if __name__ == "__main__":
@@ -177,3 +211,12 @@ if __name__ == "__main__":
 
     print("\nTEST 4: Safety knowledge question")
     print(chat_with_worker("What safety precautions for electrical work?", language="English"))
+
+    print("\nTEST 5: Kannada job search")
+    print(chat_with_worker("ಮಂಗಳೂರಿನಲ್ಲಿ ಮೇಸನ್ ಕೆಲಸ ಇದೆಯಾ?", language="Kannada"))
+
+    print("\nTEST 6: Hindi job search")
+    print(chat_with_worker("मंगलौर में मिस्त्री का काम है क्या?", language="Hindi"))
+
+    print("\nTEST 7: Navigation intent")
+    print(chat_with_worker("take me to my jobs page", language="English", return_navigation=True))

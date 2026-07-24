@@ -70,8 +70,10 @@ def check_wage(skill, location, offered_wage):
         f"₹{benchmark_data.get('benchmark_high', 550)}/day.\n"
         f"{recent_context}\n"
         f"{law_context}\n\n"
-        f"Is this wage LOW, FAIR, or HIGH? Give a verdict and 2 short sentences explaining why, "
-        f"referencing the legal wage structure where relevant."
+        f"Respond in EXACTLY this format:\n"
+        f"VERDICT: LOW, FAIR, or HIGH\n"
+        f"REASON: 2 short sentences explaining why, referencing the legal wage "
+        f"structure where relevant."
     )
 
     response = groq_client.chat.completions.create(

@@ -51,15 +51,32 @@ def match_jobs(worker_skill, worker_location, min_wage=0, max_wage=0, worker_exp
                 f"{wage_note}{experience_note}"
                 f"Call the list_jobs tool exactly ONCE with "
                 f"skill='{worker_skill}' and location='{worker_location}'. "
-                f"Do not call it again. Rank the jobs it returns in 2-4 "
-                f"short bullet points, briefly explaining why each fits "
-                f"considering the worker's skill, location, wage preference, "
-                f"and experience. If jobs don't match exactly, say so clearly."
+                f"Do not call it again.\n\n"
+                f"The list_jobs tool already applies skill-equivalence matching "
+                f"internally (e.g. it treats 'Mason' and 'Masonry' as the same "
+                f"real-world skill). If the tool returns any jobs, treat them as "
+                f"genuine skill matches — do NOT reject or second-guess a job just "
+                f"because its skill string isn't character-identical to the "
+                f"worker's skill string. Trust the tool's filtering.\n\n"
+                f"IMPORTANT: Only recommend jobs that the tool actually returned "
+                f"AND that genuinely match the worker's skill '{worker_skill}' and "
+                f"location '{worker_location}'. Do NOT invent, assume, or suggest "
+                f"any job that wasn't in the tool's result, and do NOT recommend jobs "
+                f"with a clearly different skill or location just to have something to say.\n\n"
+                f"If the tool returns no jobs, or none of the returned jobs genuinely "
+                f"match this worker's skill and location, respond with exactly this: "
+                f"'No matching jobs are currently available for {worker_skill} in "
+                f"{worker_location}. Please check back later.' Do not add fabricated "
+                f"job listings in this case.\n\n"
+                f"Otherwise, rank the genuinely matching jobs in 2-4 short bullet "
+                f"points, briefly explaining why each fits considering the worker's "
+                f"skill, location, wage preference, and experience."
             ),
             agent=agent,
             expected_output=(
-                "A short ranked list (2-4 bullet points) of the best "
-                "job matches with brief reasoning for each."
+                "Either a short ranked list (2-4 bullet points) of genuinely matching "
+                "jobs with brief reasoning, OR a clear statement that no matching jobs "
+                "are currently available — never fabricated job listings."
             ),
         )
 

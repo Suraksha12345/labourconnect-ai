@@ -28,6 +28,19 @@ if not firebase_admin._apps:
 
 db = fb_firestore.client()
 
+from functools import wraps
+
+API_SECRET_KEY = os.environ.get("API_SECRET_KEY", "")
+
+def require_api_key(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        provided_key = request.headers.get("X-API-Key", "")
+        if not API_SECRET_KEY or provided_key != API_SECRET_KEY:
+            return jsonify({"success": False, "error": "Unauthorized"}), 401
+        return f(*args, **kwargs)
+    return decorated
+
 # Cache TTL: 24 hours in seconds
 CACHE_TTL_SECONDS = 86400
 
@@ -78,11 +91,21 @@ def wage_endpoint():
     key = _cache_key("wage", skill, location, offered_wage)
     cached = _get_cache("cache_wage", key)
     if cached:
-        return jsonify({"result": cached, "cached": True})
+        return jsonify(cached)
 
-    result = check_wage(skill=skill, location=location, offered_wage=offered_wage)
+    raw_result = check_wage(skill=skill, location=location, offered_wage=offered_wage)
+
+    verdict_match = re.search(r'VERDICT:\s*(LOW|FAIR|HIGH)', raw_result, re.IGNORECASE)
+    reason_match = re.search(r'REASON:\s*(.+)', raw_result, re.DOTALL)
+
+    result = {
+        "result": reason_match.group(1).strip() if reason_match else raw_result.strip(),
+        "verdict": verdict_match.group(1).upper() if verdict_match else "FAIR",
+        "cached": False,
+    }
+
     _set_cache("cache_wage", key, result)
-    return jsonify({"result": result, "cached": False})
+    return jsonify(result)
 
 
 # ── Endpoint 2: Job Matching (NOT cached — personalized per worker) ──
@@ -152,33 +175,35 @@ def chat_endpoint():
         if not message:
             return jsonify({"reply": "Please type a message."})
 
-        reply = chat_with_worker(
+        reply, nav_target = chat_with_worker(
             worker_message=message,
             language=language,
-            worker_phone=worker_phone
+            worker_phone=worker_phone,
+            return_navigation=True
         )
 
         if not reply:
             reply = "Sorry, I didn't quite get that. Could you ask again?"
 
-        return jsonify({"reply": reply})
+        return jsonify({"reply": reply, "navigateToTab": nav_target})
 
     except Exception as e:
         print(f"[/chat] ERROR: {e}")
         return jsonify({"reply": "Sorry, I'm having trouble right now. Please try again in a moment."}), 200
 
 
-
 # ── Endpoint 5: Job Expiry (called by n8n on a schedule) ──
 @app.route("/api/jobs/expire", methods=["POST"])
+@require_api_key
 def expire_jobs():
     from datetime import timedelta
 
-    EXPIRY_DAYS = 7  # jobs older than this and still open get expired
+    POSTED_FALLBACK_DAYS = 7   # fallback: expire this many days after postedAt if startDate is unusable
+    START_GRACE_DAYS = 2       # expire this many days after the job's own startDate has passed
     dry_run = request.args.get("dry_run", "false").lower() == "true"
 
     try:
-        cutoff = datetime.now(timezone.utc) - timedelta(days=EXPIRY_DAYS)
+        now = datetime.now(timezone.utc)
         jobs_ref = db.collection("jobs")
         jobs = jobs_ref.stream()
 
@@ -188,21 +213,39 @@ def expire_jobs():
         for job in jobs:
             job_data = job.to_dict()
 
-            if job_data.get("status") == "expired":
+            if job_data.get("status") in ("expired", "removed", "completed"):
                 continue
 
-            posted_at_str = job_data.get("postedAt")
-            if not posted_at_str:
-                continue
+            should_expire = False
 
-            try:
-                posted_at = datetime.fromisoformat(posted_at_str)
-                if posted_at.tzinfo is None:
-                    posted_at = posted_at.replace(tzinfo=timezone.utc)
-            except ValueError:
-                continue
+            # Try startDate-based expiry first (DD-MM-YYYY format)
+            start_date_str = job_data.get("startDate", "")
+            start_date_parsed = None
+            if start_date_str:
+                try:
+                    start_date_parsed = datetime.strptime(start_date_str.strip(), "%d-%m-%Y").replace(tzinfo=timezone.utc)
+                except ValueError:
+                    start_date_parsed = None
 
-            if posted_at < cutoff:
+            if start_date_parsed:
+                expiry_point = start_date_parsed + timedelta(days=START_GRACE_DAYS)
+                if now > expiry_point:
+                    should_expire = True
+            else:
+                # Fallback: no usable startDate, use postedAt + flat window
+                posted_at_str = job_data.get("postedAt")
+                if posted_at_str:
+                    try:
+                        posted_at = datetime.fromisoformat(posted_at_str)
+                        if posted_at.tzinfo is None:
+                            posted_at = posted_at.replace(tzinfo=timezone.utc)
+                        cutoff = now - timedelta(days=POSTED_FALLBACK_DAYS)
+                        if posted_at < cutoff:
+                            should_expire = True
+                    except ValueError:
+                        pass
+
+            if should_expire:
                 if dry_run:
                     would_expire_titles.append(job_data.get("title", "Untitled"))
                 else:
@@ -225,6 +268,7 @@ def expire_jobs():
 
 # ── Endpoint 6: Government Scheme Reminder (called by n8n on a schedule) ──
 @app.route("/api/schemes/remind", methods=["POST"])
+@require_api_key
 def scheme_reminder():
     dry_run = request.args.get("dry_run", "false").lower() == "true"
 
@@ -275,6 +319,7 @@ def scheme_reminder():
 
 # ── Endpoint 7: Feedback Collection Trigger (called by n8n on a schedule) ──
 @app.route("/api/jobs/request-feedback", methods=["POST"])
+@require_api_key
 def request_feedback():
     dry_run = request.args.get("dry_run", "false").lower() == "true"
 
@@ -332,6 +377,7 @@ def request_feedback():
 
 # ── Endpoint 8: Job Notification to Matching Workers (called by n8n on a schedule) ──
 @app.route("/api/jobs/notify-matches", methods=["POST"])
+@require_api_key
 def notify_matching_workers():
     dry_run = request.args.get("dry_run", "false").lower() == "true"
 
@@ -401,6 +447,7 @@ def notify_matching_workers():
 
 # ── Endpoint 9: KYC Scan (format validation + duplicate check) ──
 @app.route("/api/kyc/scan", methods=["POST"])
+@require_api_key
 def kyc_scan():
     dry_run = request.args.get("dry_run", "false").lower() == "true"
 
@@ -506,6 +553,7 @@ def kyc_scan():
 ADMIN_PHONE = "1234567890"
 
 @app.route("/api/reports/alert-admin", methods=["POST"])
+@require_api_key
 def alert_admin_of_reports():
     dry_run = request.args.get("dry_run", "false").lower() == "true"
 
@@ -553,6 +601,7 @@ def alert_admin_of_reports():
     
 # ── Endpoint 11: Payment Reminder (called by n8n on a schedule) ──
 @app.route("/api/payments/remind", methods=["POST"])
+@require_api_key
 def payment_reminder():
     from datetime import timedelta
 
@@ -626,6 +675,439 @@ def payment_reminder():
     except Exception as e:
         print(f"[/api/payments/remind] ERROR: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
+
+# ── Endpoint 12: Job Posted Confirmation (Action Layer — called instantly by Flutter after job creation) ──
+@app.route("/actions/job-posted", methods=["POST"])
+@require_api_key
+def job_posted_action():
+    try:
+        data = request.get_json(force=True)
+        job_id = data.get("jobId", "")
+
+        if not job_id:
+            return jsonify({"success": False, "error": "jobId is required"}), 400
+
+        job_doc = db.collection("jobs").document(job_id).get()
+        if not job_doc.exists:
+            return jsonify({"success": False, "error": "Job not found"}), 404
+
+        job_data = job_doc.to_dict()
+        contractor_phone = job_data.get("contractorPhone", "")
+        job_title = job_data.get("title", "Untitled")
+
+        if not contractor_phone:
+            return jsonify({"success": False, "error": "Job has no contractorPhone"}), 400
+
+        db.collection("notifications").add({
+            "workerPhone": contractor_phone,
+            "type": "job_posted_confirmation",
+            "message": f"Your job '{job_title}' is now live and visible to workers.",
+            "jobId": job_id,
+            "createdAt": datetime.now(timezone.utc).isoformat(),
+            "read": False,
+        })
+
+        print(f"[job posted] confirmation sent to {contractor_phone} for job {job_id}")
+
+        return jsonify({"success": True, "message": "Confirmation notification sent"})
+
+    except Exception as e:
+        print(f"[/actions/job-posted] ERROR: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+# ── Endpoint 13: Payment Received (Action Layer — replaces direct client write) ──
+def _last10(phone):
+    digits = re.sub(r'\D', '', phone or '')
+    return digits[-10:] if len(digits) >= 10 else digits
+
+
+@app.route("/actions/payment-received", methods=["POST"])
+@require_api_key
+def payment_received_action():
+    try:
+        data = request.get_json(force=True)
+        application_id = data.get("applicationId", "")
+        contractor_phone = data.get("contractorPhone", "")
+
+        if not application_id or not contractor_phone:
+            return jsonify({"success": False, "error": "applicationId and contractorPhone are required"}), 400
+
+        app_ref = db.collection("applications").document(application_id)
+        app_doc = app_ref.get()
+        if not app_doc.exists:
+            return jsonify({"success": False, "error": "Application not found"}), 404
+
+        app_data = app_doc.to_dict()
+
+        if app_data.get("status") != "completed":
+            return jsonify({"success": False, "error": "Application is not marked completed yet"}), 400
+
+        if app_data.get("paid"):
+            return jsonify({"success": False, "error": "Payment already marked as received"}), 400
+
+        job_id = app_data.get("jobId", "")
+        if not job_id:
+            return jsonify({"success": False, "error": "Application has no linked jobId"}), 400
+
+        job_doc = db.collection("jobs").document(job_id).get()
+        if not job_doc.exists:
+            return jsonify({"success": False, "error": "Linked job not found"}), 404
+
+        job_contractor_phone = job_doc.to_dict().get("contractorPhone", "")
+
+        if _last10(contractor_phone) != _last10(job_contractor_phone):
+            return jsonify({"success": False, "error": "You are not the contractor for this job"}), 403
+
+        app_ref.update({
+            "paid": True,
+            "paidAt": datetime.now(timezone.utc).isoformat(),
+        })
+
+        worker_phone = app_data.get("workerPhone", "")
+        job_title = app_data.get("jobTitle", "Untitled")
+        if worker_phone:
+            db.collection("notifications").add({
+                "workerPhone": worker_phone,
+                "type": "payment_received",
+                "message": f"Payment for '{job_title}' has been marked as received.",
+                "jobId": job_id,
+                "createdAt": datetime.now(timezone.utc).isoformat(),
+                "read": False,
+            })
+
+        print(f"[payment received] application {application_id} marked paid by {contractor_phone}")
+
+        return jsonify({"success": True, "message": "Payment marked as received"})
+
+    except Exception as e:
+        print(f"[/actions/payment-received] ERROR: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+    
+    # ── Endpoint 14: Remove Job (Action Layer — replaces title-matching in dashboard) ──
+@app.route("/actions/remove-job", methods=["POST"])
+@require_api_key
+def remove_job_action():
+    try:
+        data = request.get_json(force=True)
+        job_id = data.get("jobId", "")
+        report_id = data.get("reportId", "")
+
+        if not job_id:
+            return jsonify({"success": False, "error": "jobId is required"}), 400
+
+        job_ref = db.collection("jobs").document(job_id)
+        job_doc = job_ref.get()
+        if not job_doc.exists:
+            return jsonify({"success": False, "error": "Job not found"}), 404
+
+        job_title = job_doc.to_dict().get("title", "Untitled")
+
+        job_ref.update({"status": "removed"})
+
+        affected_applications = db.collection("applications") \
+            .where("jobId", "==", job_id) \
+            .stream()
+
+        notified_count = 0
+        for app_doc in affected_applications:
+            app_data = app_doc.to_dict()
+            if app_data.get("status") == "completed":
+                continue
+            worker_phone = app_data.get("workerPhone", "")
+            if not worker_phone:
+                continue
+            db.collection("notifications").add({
+                "workerPhone": worker_phone,
+                "type": "job_removed",
+                "message": f"The job '{job_title}' has been removed and is no longer active.",
+                "jobId": job_id,
+                "createdAt": datetime.now(timezone.utc).isoformat(),
+                "read": False,
+            })
+            notified_count += 1
+
+        if report_id:
+            db.collection("reports").document(report_id).update({"reviewedByAdmin": True})
+
+        print(f"[remove job] job {job_id} removed, {notified_count} workers notified")
+
+        return jsonify({
+            "success": True,
+            "message": "Job removed",
+            "notified_count": notified_count
+        })
+
+    except Exception as e:
+        print(f"[/actions/remove-job] ERROR: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+    
+
+# ── Endpoint 15: Report Submitted (Action Layer — instant admin alert) ──
+@app.route("/actions/report-submitted", methods=["POST"])
+@require_api_key
+def report_submitted_action():
+    try:
+        data = request.get_json(force=True)
+        report_id = data.get("reportId", "")
+
+        if not report_id:
+            return jsonify({"success": False, "error": "reportId is required"}), 400
+
+        report_doc = db.collection("reports").document(report_id).get()
+        if not report_doc.exists:
+            return jsonify({"success": False, "error": "Report not found"}), 404
+
+        report_data = report_doc.to_dict()
+
+        if report_data.get("alertSent"):
+            return jsonify({"success": True, "message": "Alert already sent for this report"})
+
+        job_title = report_data.get("jobTitle", "Unknown job")
+        reason = report_data.get("reason", "No reason given")
+
+        db.collection("notifications").add({
+            "workerPhone": ADMIN_PHONE,
+            "type": "fraud_alert",
+            "message": f"⚠️ New report on '{job_title}': {reason}",
+            "reportId": report_id,
+            "createdAt": datetime.now(timezone.utc).isoformat(),
+            "read": False,
+        })
+        report_doc.reference.update({"alertSent": True})
+
+        print(f"[report submitted] instant admin alert sent for report {report_id}")
+
+        return jsonify({"success": True, "message": "Admin alerted instantly"})
+
+    except Exception as e:
+        print(f"[/actions/report-submitted] ERROR: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+# ── Endpoint 16: Registration Complete (Action Layer — instant welcome notification) ──
+@app.route("/actions/register-complete", methods=["POST"])
+@require_api_key
+def register_complete_action():
+    try:
+        data = request.get_json(force=True)
+        phone = data.get("phone", "")
+        name = data.get("name", "")
+        role = data.get("role", "")  # "worker" or "contractor"
+
+        if not phone or not role:
+            return jsonify({"success": False, "error": "phone and role are required"}), 400
+
+        if role == "worker":
+            message = f"Welcome to LabourConnect, {name}! Browse jobs matching your skills and apply anytime."
+        elif role == "contractor":
+            message = f"Welcome to LabourConnect, {name}! Post your first job and AI will help verify it for safety."
+        else:
+            return jsonify({"success": False, "error": "role must be 'worker' or 'contractor'"}), 400
+
+        db.collection("notifications").add({
+            "workerPhone": phone,
+            "type": "welcome",
+            "message": message,
+            "createdAt": datetime.now(timezone.utc).isoformat(),
+            "read": False,
+        })
+
+        print(f"[register complete] welcome notification sent to {phone} ({role})")
+
+        return jsonify({"success": True, "message": "Welcome notification sent"})
+
+    except Exception as e:
+        print(f"[/actions/register-complete] ERROR: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+# ── Endpoint 17: Application Decision (Action Layer — accept/reject + instant notification) ──
+@app.route("/actions/application-decision", methods=["POST"])
+@require_api_key
+def application_decision_action():
+    try:
+        data = request.get_json(force=True)
+        application_id = data.get("applicationId", "")
+        decision = data.get("decision", "")  # "accepted" or "rejected"
+        contractor_phone = data.get("contractorPhone", "")
+
+        if not application_id or decision not in ("accepted", "rejected"):
+            return jsonify({"success": False, "error": "applicationId and decision ('accepted' or 'rejected') are required"}), 400
+
+        app_ref = db.collection("applications").document(application_id)
+        app_doc = app_ref.get()
+        if not app_doc.exists:
+            return jsonify({"success": False, "error": "Application not found"}), 404
+
+        app_data = app_doc.to_dict()
+        job_id = app_data.get("jobId", "")
+
+        if job_id:
+            job_doc = db.collection("jobs").document(job_id).get()
+            if job_doc.exists:
+                job_contractor_phone = job_doc.to_dict().get("contractorPhone", "")
+                if _last10(contractor_phone) != _last10(job_contractor_phone):
+                    return jsonify({"success": False, "error": "You are not the contractor for this job"}), 403
+
+        app_ref.update({
+            "status": decision,
+            "decidedAt": datetime.now(timezone.utc).isoformat(),
+        })
+
+        worker_phone = app_data.get("workerPhone", "")
+        job_title = app_data.get("jobTitle", "Untitled")
+        if worker_phone:
+            message = (
+                f"Good news! Your application for '{job_title}' was accepted."
+                if decision == "accepted"
+                else f"Your application for '{job_title}' was not selected this time."
+            )
+            db.collection("notifications").add({
+                "workerPhone": worker_phone,
+                "type": "application_decision",
+                "message": message,
+                "jobId": job_id,
+                "createdAt": datetime.now(timezone.utc).isoformat(),
+                "read": False,
+            })
+
+        print(f"[application decision] {application_id} → {decision}")
+
+        return jsonify({"success": True, "message": f"Application {decision}"})
+
+    except Exception as e:
+        print(f"[/actions/application-decision] ERROR: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+
+@app.route("/actions/application-submitted", methods=["POST"])
+@require_api_key
+def application_submitted_action():
+    try:
+        data = request.get_json(force=True)
+        application_id = data.get("applicationId", "")
+
+        if not application_id:
+            return jsonify({"success": False, "error": "applicationId is required"}), 400
+
+        app_doc = db.collection("applications").document(application_id).get()
+        if not app_doc.exists:
+            return jsonify({"success": False, "error": "Application not found"}), 404
+
+        app_data = app_doc.to_dict()
+        job_id = app_data.get("jobId", "")
+        job_title = app_data.get("jobTitle", "Untitled")
+
+        job_doc = db.collection("jobs").document(job_id).get()
+        if not job_doc.exists:
+            return jsonify({"success": False, "error": "Linked job not found"}), 404
+
+        contractor_phone = job_doc.to_dict().get("contractorPhone", "")
+        if not contractor_phone:
+            return jsonify({"success": False, "error": "Job has no contractorPhone"}), 400
+
+        db.collection("notifications").add({
+            "workerPhone": contractor_phone,
+            "type": "new_applicant",
+            "message": f"A new worker applied for '{job_title}'. Tap to review applicants.",
+            "jobId": job_id,
+            "jobTitle": job_title,  
+            "applicationId": application_id,
+            "createdAt": datetime.now(timezone.utc).isoformat(),
+            "read": False,
+        })
+
+        return jsonify({"success": True, "message": "Contractor notified"})
+
+    except Exception as e:
+        print(f"[/actions/application-submitted] ERROR: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+# ── Endpoint 18: KYC Decision (Action Layer — admin approve/reject with instant notification) ──
+@app.route("/actions/kyc-decision", methods=["POST"])
+@require_api_key
+def kyc_decision_action():
+    try:
+        data = request.get_json(force=True)
+        collection_name = data.get("collection", "")  # "workers" or "contractors"
+        doc_id = data.get("docId", "")
+        decision = data.get("decision", "")  # "verified" or "flagged"
+
+        if collection_name not in ("workers", "contractors") or not doc_id or decision not in ("verified", "flagged"):
+            return jsonify({"success": False, "error": "collection ('workers'/'contractors'), docId, and decision ('verified'/'flagged') are required"}), 400
+
+        person_ref = db.collection(collection_name).document(doc_id)
+        person_doc = person_ref.get()
+        if not person_doc.exists:
+            return jsonify({"success": False, "error": "Person not found"}), 404
+
+        person_data = person_doc.to_dict()
+        phone = person_data.get("phone", "")
+
+        person_ref.update({"kycStatus": decision})
+
+        if phone:
+            message = (
+                "Your KYC has been verified by an admin. You now have full access."
+                if decision == "verified"
+                else "Your KYC was reviewed and flagged. Please check your submitted ID and try again."
+            )
+            db.collection("notifications").add({
+                "workerPhone": phone,
+                "type": "kyc_update",
+                "message": message,
+                "createdAt": datetime.now(timezone.utc).isoformat(),
+                "read": False,
+            })
+
+        print(f"[kyc decision] {collection_name}/{doc_id} → {decision}")
+
+        return jsonify({"success": True, "message": f"KYC marked {decision}"})
+
+    except Exception as e:
+        print(f"[/actions/kyc-decision] ERROR: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+    
+
+# ── Endpoint 19: Register Device Token (Action Layer — for FCM push notifications) ──
+@app.route("/actions/register-device-token", methods=["POST"])
+@require_api_key
+def register_device_token_action():
+    try:
+        data = request.get_json(force=True)
+        phone = data.get("phone", "")
+        fcm_token = data.get("fcmToken", "")
+
+        if not phone or not fcm_token:
+            return jsonify({"success": False, "error": "phone and fcmToken are required"}), 400
+
+        digits = re.sub(r'\D', '', phone)
+        phone10 = digits[-10:] if len(digits) >= 10 else digits
+
+        updated = False
+        for collection_name in ("workers", "contractors"):
+            docs = db.collection(collection_name).stream()
+            for doc in docs:
+                doc_phone = re.sub(r'\D', '', doc.to_dict().get("phone", ""))
+                doc_phone10 = doc_phone[-10:] if len(doc_phone) >= 10 else doc_phone
+                if doc_phone10 == phone10:
+                    doc.reference.update({"fcmToken": fcm_token})
+                    updated = True
+                    break
+            if updated:
+                break
+
+        if not updated:
+            return jsonify({"success": False, "error": "No worker/contractor found with that phone"}), 404
+
+        print(f"[register device token] token saved for {phone}")
+
+        return jsonify({"success": True, "message": "Device token registered"})
+
+    except Exception as e:
+        print(f"[/actions/register-device-token] ERROR: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500    
 
 
 # ── Health check ──

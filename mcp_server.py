@@ -53,6 +53,40 @@ def _last10(raw):
 # JOB MATCHING AGENT
 # ════════════════════════════════════════════════════════════
 
+# Groups of skill terms that should be treated as the same real-world skill,
+# since WorkerRegistrationScreen and PostJobScreen use two different vocabularies
+# (role names vs. work-category names)
+SKILL_GROUPS = [
+    {"mason", "masonry", "construction laborer", "construction"},
+    {"painter", "painting"},
+    {"plumber", "plumbing"},
+    {"carpenter", "carpentry"},
+    {"farmer", "farming"},
+    {"loader", "loading"},
+    {"electrician", "electrical"},
+    {"welder", "welding"},
+    {"driver", "driving"},
+    {"cook", "cooking"},
+    {"cleaner", "cleaning"},
+    {"security guard", "security"},
+    {"gardener", "gardening"},
+    {"mechanic", "mechanical work"},
+    {"tailor", "tailoring"},
+    {"housekeeping"},
+    {"factory worker", "factory work"},
+    {"warehouse worker", "warehouse work"},
+    {"helper"},
+]
+
+
+def _skill_group(s: str) -> set:
+    """Return the group of equivalent skill terms this string belongs to."""
+    s = s.strip().lower()
+    for group in SKILL_GROUPS:
+        if s in group:
+            return group
+    return {s}  # unknown skill — only matches itself
+
 @mcp.tool()
 def list_jobs(
     skill: str = "",
@@ -78,6 +112,8 @@ def list_jobs(
 
     for doc in jobs_ref:
         data = doc.to_dict()
+        if data.get("status") in ("expired", "removed", "completed"):
+            continue
         all_jobs.append({
             "title": data.get("title", ""),
             "skill": data.get("skill", ""),
@@ -87,7 +123,11 @@ def list_jobs(
         })
 
     def matches_skill(job):
-        return not skill or job["skill"].strip().lower() == skill.strip().lower()
+        if not skill:
+            return True
+        worker_group = _skill_group(skill)
+        job_skill = job["skill"].strip().lower()
+        return job_skill in worker_group
 
     def matches_location(job):
         return not location or location.strip().lower() in job["location"].strip().lower()
