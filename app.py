@@ -5,6 +5,29 @@ import json
 import hashlib
 from datetime import datetime, timezone
 
+import hashlib
+from cryptography.fernet import Fernet
+
+GOVT_ID_ENCRYPTION_KEY = os.environ.get("GOVT_ID_ENCRYPTION_KEY", "")
+_fernet = Fernet(GOVT_ID_ENCRYPTION_KEY.encode()) if GOVT_ID_ENCRYPTION_KEY else None
+
+
+def _hash_govt_id(plain_id):
+    normalized = plain_id.strip().upper().replace(" ", "")
+    return hashlib.sha256(normalized.encode()).hexdigest()
+
+
+def _encrypt_govt_id(plain_id):
+    if not _fernet:
+        raise RuntimeError("GOVT_ID_ENCRYPTION_KEY is not configured")
+    return _fernet.encrypt(plain_id.encode()).decode()
+
+
+def _decrypt_govt_id(encrypted_id):
+    if not _fernet:
+        raise RuntimeError("GOVT_ID_ENCRYPTION_KEY is not configured")
+    return _fernet.decrypt(encrypted_id.encode()).decode()
+
 import firebase_admin
 from firebase_admin import credentials, firestore as fb_firestore
 
@@ -713,6 +736,26 @@ def job_posted_action():
 
     except Exception as e:
         print(f"[/actions/job-posted] ERROR: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@app.route("/actions/encrypt-govt-id", methods=["POST"])
+@require_api_key
+def encrypt_govt_id_action():
+    try:
+        data = request.get_json(force=True)
+        plain_id = data.get("govtId", "")
+
+        if not plain_id:
+            return jsonify({"success": False, "error": "govtId is required"}), 400
+
+        return jsonify({
+            "success": True,
+            "govtIdHash": _hash_govt_id(plain_id),
+            "govtIdEncrypted": _encrypt_govt_id(plain_id),
+        })
+
+    except Exception as e:
+        print(f"[/actions/encrypt-govt-id] ERROR: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
 
 # ── Endpoint 13: Payment Received (Action Layer — replaces direct client write) ──
