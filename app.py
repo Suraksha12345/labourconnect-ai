@@ -1024,6 +1024,24 @@ def application_submitted_action():
         print(f"[/actions/application-submitted] ERROR: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
 
+@app.route("/actions/mark-notification-read", methods=["POST"])
+@require_api_key
+def mark_notification_read_action():
+    try:
+        data = request.get_json(force=True)
+        notification_id = data.get("notificationId", "")
+
+        if not notification_id:
+            return jsonify({"success": False, "error": "notificationId is required"}), 400
+
+        db.collection("notifications").document(notification_id).update({"read": True})
+
+        return jsonify({"success": True, "message": "Notification marked as read"})
+
+    except Exception as e:
+        print(f"[/actions/mark-notification-read] ERROR: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
 # ── Endpoint 18: KYC Decision (Action Layer — admin approve/reject with instant notification) ──
 @app.route("/actions/kyc-decision", methods=["POST"])
 @require_api_key
