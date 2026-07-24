@@ -492,40 +492,49 @@ def kyc_scan():
         workers = list(db.collection("workers").stream())
         contractors = list(db.collection("contractors").stream())
 
-        # Build a map of govtId -> list of (collection, doc_id, phone) to find duplicates
+        # Build a map of govtIdHash -> list of (collection, doc_id) to find duplicates
         id_map = {}
         all_people = []
 
         for doc in workers:
             data = doc.to_dict()
-            govt_id = (data.get("govtId") or "").strip()
-            all_people.append(("workers", doc.id, data, govt_id))
-            if govt_id:
-                id_map.setdefault(govt_id, []).append(("workers", doc.id))
+            govt_id_hash = (data.get("govtIdHash") or "").strip()
+            all_people.append(("workers", doc.id, data, govt_id_hash))
+            if govt_id_hash:
+                id_map.setdefault(govt_id_hash, []).append(("workers", doc.id))
 
         for doc in contractors:
             data = doc.to_dict()
-            govt_id = (data.get("govtId") or "").strip()
-            all_people.append(("contractors", doc.id, data, govt_id))
-            if govt_id:
-                id_map.setdefault(govt_id, []).append(("contractors", doc.id))
+            govt_id_hash = (data.get("govtIdHash") or "").strip()
+            all_people.append(("contractors", doc.id, data, govt_id_hash))
+            if govt_id_hash:
+                id_map.setdefault(govt_id_hash, []).append(("contractors", doc.id))
 
         flagged_count = 0
         pending_count = 0
         summary = []
 
-        for collection_name, doc_id, data, govt_id in all_people:
-            # Skip if already reviewed (verified or already flagged) to avoid re-processing every run
+        for collection_name, doc_id, data, govt_id_hash in all_people:
             if data.get("kycStatus") in ("verified", "flagged"):
                 continue
 
             phone = data.get("phone", "")
             name = data.get("name", "Unknown")
+            govt_id_encrypted = (data.get("govtIdEncrypted") or "").strip()
 
-            is_duplicate = govt_id and len(id_map.get(govt_id, [])) > 1
-            is_valid_format = govt_id and id_format_valid(govt_id)
+            is_duplicate = govt_id_hash and len(id_map.get(govt_id_hash, [])) > 1
 
-            if not govt_id:
+            decrypted_id = ""
+            is_valid_format = False
+            if govt_id_encrypted:
+                try:
+                    decrypted_id = _decrypt_govt_id(govt_id_encrypted)
+                    is_valid_format = id_format_valid(decrypted_id)
+                except Exception as decrypt_error:
+                    print(f"[kyc scan] decrypt error for {collection_name}/{doc_id}: {decrypt_error}")
+                    is_valid_format = False
+
+            if not govt_id_encrypted:
                 new_status = "flagged"
                 reason = "No government ID provided"
             elif is_duplicate:
@@ -570,8 +579,8 @@ def kyc_scan():
     except Exception as e:
         print(f"[/api/kyc/scan] ERROR: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
-    
 
+    
 # ── Endpoint 10: Fraud Alert to Admin (called by n8n on a schedule) ──
 ADMIN_PHONE = "1234567890"
 
