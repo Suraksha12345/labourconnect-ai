@@ -77,7 +77,7 @@ def check_wage(skill, location, offered_wage):
     )
 
     response = groq_client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+        model="openai/gpt-oss-120b",
         messages=[
             {"role": "system", "content": "You are a fair-wage advisor for daily labour markets in rural Karnataka."},
             {"role": "user", "content": prompt}

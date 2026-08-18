@@ -77,7 +77,7 @@ def check_job_safety(job_title, job_description, wage, location,
     )
 
     response = groq_client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+       model="openai/gpt-oss-120b",
         messages=[
             {"role": "system", "content": SAFETY_BACKSTORY},
             {"role": "user", "content": prompt}

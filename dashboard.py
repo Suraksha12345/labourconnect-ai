@@ -1,9 +1,31 @@
 import streamlit as st
 import pandas as pd
+import requests
 import firebase_admin
 from firebase_admin import credentials, firestore
 from datetime import datetime
+import firebase_admin
+from firebase_admin import credentials, firestore
 
+import firebase_admin
+from firebase_admin import credentials, firestore
+from cryptography.fernet import Fernet
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+GOVT_ID_ENCRYPTION_KEY = os.environ.get("GOVT_ID_ENCRYPTION_KEY", "")
+_fernet = Fernet(GOVT_ID_ENCRYPTION_KEY.encode()) if GOVT_ID_ENCRYPTION_KEY else None
+
+def decrypt_govt_id(encrypted_id):
+    if not _fernet or not encrypted_id:
+        return "—"
+    try:
+        return _fernet.decrypt(encrypted_id.encode()).decode()
+    except Exception:
+        return "Unable to decrypt"
+    
 # ================================================
 # PAGE CONFIG
 # ================================================
@@ -42,12 +64,29 @@ except Exception as e:
 # ================================================
 @st.cache_data(ttl=60)
 def load_data():
-    workers = [doc.to_dict() for doc in db.collection('workers').stream()]
-    contractors = [doc.to_dict() for doc in db.collection('contractors').stream()]
-    jobs = [doc.to_dict() for doc in db.collection('jobs').stream()]
-    return workers, contractors, jobs
+    workers = []
+    for doc in db.collection('workers').stream():
+        w = doc.to_dict()
+        w['_id'] = doc.id
+        workers.append(w)
 
-workers, contractors, jobs = load_data()
+    contractors = []
+    for doc in db.collection('contractors').stream():
+        c = doc.to_dict()
+        c['_id'] = doc.id
+        contractors.append(c)
+
+    jobs = [doc.to_dict() for doc in db.collection('jobs').stream()]
+
+    reports = []
+    for doc in db.collection('reports').stream():
+        r = doc.to_dict()
+        r['_id'] = doc.id
+        reports.append(r)
+
+    return workers, contractors, jobs, reports
+
+workers, contractors, jobs, reports = load_data()
 
 
 def parse_date_str(value):
@@ -187,6 +226,118 @@ if contractors:
     st.dataframe(contractors_df[display_cols].head(10), use_container_width=True, hide_index=True)
 else:
     st.info("No contractors registered yet.")
+
+# ================================================
+# FRAUD REPORTS
+# ================================================
+st.subheader("🚩 Fraud / Suspicious Job Reports")
+
+if reports:
+    pending_reports = [r for r in reports if not r.get('reviewedByAdmin')]
+    reviewed_reports = [r for r in reports if r.get('reviewedByAdmin')]
+
+    st.write(f"**{len(pending_reports)} pending** · {len(reviewed_reports)} reviewed")
+
+    if pending_reports:
+        for r in pending_reports:
+            with st.container(border=True):
+                col_a, col_b = st.columns([4, 1])
+                with col_a:
+                    st.markdown(f"**{r.get('jobTitle', 'Untitled job') or 'Untitled job'}**")
+                    st.caption(f"Reason: {r.get('reason', 'No reason given')}")
+                    st.caption(f"Reported at: {r.get('reportedAt', '—')}")
+                with col_b:
+                    if st.button("✅ Mark Reviewed", key=f"review_{r['_id']}"):
+                        db.collection('reports').document(r['_id']).update({'reviewedByAdmin': True})
+                        st.cache_data.clear()
+                        st.rerun()
+                    if st.button("🗑️ Remove Job", key=f"remove_{r['_id']}"):
+                        job_id = r.get('jobId', '')
+                        if job_id:
+                            try:
+                                response = requests.post(
+                                    "http://localhost:5000/actions/remove-job",
+                                    json={"jobId": job_id, "reportId": r['_id']},
+                                    headers={"X-API-Key": "LC_MangaloreLabour_9x7k2m"},
+                                )
+                                result = response.json()
+                                if result.get("success"):
+                                    st.cache_data.clear()
+                                    st.rerun()
+                                else:
+                                    st.error(f"Could not remove job: {result.get('error', 'Unknown error')}")
+                            except Exception as e:
+                                st.error(f"Error calling backend: {e}")
+                        else:
+                            st.error("This report has no jobId (submitted before the fix) — cannot safely remove the job. Mark it reviewed manually instead.")
+    else:
+        st.info("No pending reports — all caught up!")
+
+    if reviewed_reports:
+        with st.expander(f"View {len(reviewed_reports)} reviewed reports"):
+            reviewed_df = pd.DataFrame(reviewed_reports)
+            display_cols = [c for c in ['jobTitle', 'reason', 'reportedAt'] if c in reviewed_df.columns]
+            st.dataframe(reviewed_df[display_cols], use_container_width=True, hide_index=True)
+else:
+    st.info("No reports submitted yet.")
+
+st.divider()
+
+# ================================================
+# KYC REVIEW
+# ================================================
+st.subheader("🪪 KYC Review")
+
+kyc_pending = []
+for w in workers:
+    if w.get('kycStatus') == 'pending_review':
+        kyc_pending.append({**w, '_collection': 'workers'})
+for c in contractors:
+    if c.get('kycStatus') == 'pending_review':
+        kyc_pending.append({**c, '_collection': 'contractors'})
+
+if kyc_pending:
+    st.write(f"**{len(kyc_pending)} pending review**")
+    for p in kyc_pending:
+        with st.container(border=True):
+            col_a, col_b = st.columns([4, 1])
+            with col_a:
+                st.markdown(f"**{p.get('name', 'Unknown') or 'Unknown'}** ({p['_collection'][:-1]})")
+                st.caption(f"Phone: {p.get('phone', '—')}")
+                st.caption(f"Govt ID: {decrypt_govt_id(p.get('govtIdEncrypted', ''))}")
+            with col_b:
+                if st.button("✅ Verify", key=f"verify_{p['_id']}"):
+                    try:
+                        response = requests.post(
+                            "http://localhost:5000/actions/kyc-decision",
+                            json={"collection": p['_collection'], "docId": p['_id'], "decision": "verified"},
+                            headers={"X-API-Key": "LC_MangaloreLabour_9x7k2m"},
+                        )
+                        result = response.json()
+                        if result.get("success"):
+                            st.cache_data.clear()
+                            st.rerun()
+                        else:
+                            st.error(f"Could not verify: {result.get('error', 'Unknown error')}")
+                    except Exception as e:
+                        st.error(f"Error calling backend: {e}")
+                if st.button("🚩 Flag", key=f"flag_{p['_id']}"):
+                    try:
+                        response = requests.post(
+                            "http://localhost:5000/actions/kyc-decision",
+                            json={"collection": p['_collection'], "docId": p['_id'], "decision": "flagged"},
+                            headers={"X-API-Key": "LC_MangaloreLabour_9x7k2m"},
+                        )
+                        result = response.json()
+                        if result.get("success"):
+                            st.cache_data.clear()
+                            st.rerun()
+                        else:
+                            st.error(f"Could not flag: {result.get('error', 'Unknown error')}")
+                    except Exception as e:
+                        st.error(f"Error calling backend: {e}")
+else:
+    st.info("No KYC submissions pending review.")
 
 st.divider()
 st.caption(

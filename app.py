@@ -5,6 +5,9 @@ import json
 import hashlib
 from datetime import datetime, timezone
 
+from dotenv import load_dotenv
+load_dotenv()
+
 import hashlib
 from cryptography.fernet import Fernet
 
@@ -40,6 +43,18 @@ get_client().start()
 
 app = Flask(__name__)
 
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
+
+REDIS_URL = os.environ.get("REDIS_URL", "memory://")
+
+limiter = Limiter(
+    get_remote_address,
+    app=app,
+    default_limits=["100 per hour"],
+    storage_uri=REDIS_URL,
+)
+
 # ── Firebase connection (for caching) ──
 if not firebase_admin._apps:
     service_account_json = os.environ.get("FIREBASE_SERVICE_ACCOUNT_JSON")
@@ -60,9 +75,16 @@ def require_api_key(f):
     def decorated(*args, **kwargs):
         provided_key = request.headers.get("X-API-Key", "")
         if not API_SECRET_KEY or provided_key != API_SECRET_KEY:
+            print(f"[AUTH FAILED] {request.method} {request.path} from {request.remote_addr} at {datetime.now(timezone.utc).isoformat()}")
             return jsonify({"success": False, "error": "Unauthorized"}), 401
         return f(*args, **kwargs)
     return decorated
+
+def _safe_error(e, context=""):
+    """Log the real error server-side, return a generic message to the client."""
+    print(f"[{context}] ERROR: {e}")
+    return jsonify({"success": False, "error": "Something went wrong. Please try again."}), 500
+
 
 # Cache TTL: 24 hours in seconds
 CACHE_TTL_SECONDS = 86400
@@ -107,87 +129,97 @@ def _set_cache(collection, key, value):
 @app.route("/check_wage", methods=["POST"])
 def wage_endpoint():
     data = request.get_json()
-    skill = data.get("skill") or ""
-    location = data.get("location") or ""
-    offered_wage = data.get("offered_wage") or 0
+    try:
+        skill = data.get("skill") or ""
+        location = data.get("location") or ""
+        offered_wage = data.get("offered_wage") or 0
 
-    key = _cache_key("wage", skill, location, offered_wage)
-    cached = _get_cache("cache_wage", key)
-    if cached:
-        return jsonify(cached)
+        key = _cache_key("wage", skill, location, offered_wage)
+        cached = _get_cache("cache_wage", key)
+        if cached:
+            return jsonify(cached)
 
-    raw_result = check_wage(skill=skill, location=location, offered_wage=offered_wage)
+        raw_result = check_wage(skill=skill, location=location, offered_wage=offered_wage)
 
-    verdict_match = re.search(r'VERDICT:\s*(LOW|FAIR|HIGH)', raw_result, re.IGNORECASE)
-    reason_match = re.search(r'REASON:\s*(.+)', raw_result, re.DOTALL)
+        verdict_match = re.search(r'VERDICT:\s*(LOW|FAIR|HIGH)', raw_result, re.IGNORECASE)
+        reason_match = re.search(r'REASON:\s*(.+)', raw_result, re.DOTALL)
 
-    result = {
-        "result": reason_match.group(1).strip() if reason_match else raw_result.strip(),
-        "verdict": verdict_match.group(1).upper() if verdict_match else "FAIR",
-        "cached": False,
-    }
+        result = {
+            "result": reason_match.group(1).strip() if reason_match else raw_result.strip(),
+            "verdict": verdict_match.group(1).upper() if verdict_match else "FAIR",
+            "cached": False,
+        }
 
-    _set_cache("cache_wage", key, result)
-    return jsonify(result)
+        _set_cache("cache_wage", key, result)
+        return jsonify(result)
+    except Exception as e:
+        return _safe_error(e, "/check_wage")
 
 
 # ── Endpoint 2: Job Matching (NOT cached — personalized per worker) ──
 @app.route("/match_jobs", methods=["POST"])
 def job_matching_endpoint():
-    data = request.get_json()
-    result = match_jobs(
-        worker_skill=data.get("worker_skill"),
-        worker_location=data.get("worker_location"),
-        min_wage=data.get("min_wage", 0) or 0,
-        max_wage=data.get("max_wage", 0) or 0,
-        worker_experience=data.get("worker_experience", "") or "",
-    )
-    return jsonify({"result": result})
+    try:
+        data = request.get_json()
+        result = match_jobs(
+            worker_skill=data.get("worker_skill"),
+            worker_location=data.get("worker_location"),
+            min_wage=data.get("min_wage", 0) or 0,
+            max_wage=data.get("max_wage", 0) or 0,
+            worker_experience=data.get("worker_experience", "") or "",
+        )
+        return jsonify({"result": result})
+    except Exception as e:
+        return _safe_error(e, "/match_jobs")
 
 
 # ── Endpoint 3: Safety Check (cached) ──
 @app.route("/check_safety", methods=["POST"])
 def safety_endpoint():
-    data = request.get_json()
-    job_title = data.get("job_title") or ""
-    job_description = data.get("job_description") or ""
-    wage = data.get("wage") or ""
-    location = data.get("location") or ""
-    contractor_phone = data.get("contractor_phone", "") or ""
-    contractor_name = data.get("contractor_name", "") or ""
+    try:
+        data = request.get_json()
+        job_title = data.get("job_title") or ""
+        job_description = data.get("job_description") or ""
+        wage = data.get("wage") or ""
+        location = data.get("location") or ""
+        contractor_phone = data.get("contractor_phone", "") or ""
+        contractor_name = data.get("contractor_name", "") or ""
 
-    # Cache key: job title + wage + location (description intentionally excluded
-    # since two identical jobs may have slightly different wording but same risk)
-    key = _cache_key("safety", job_title, wage, location)
-    cached = _get_cache("cache_safety", key)
-    if cached:
-        return jsonify({**cached, "cached": True})
+        # Cache key: job title + wage + location (description intentionally excluded
+        # since two identical jobs may have slightly different wording but same risk)
+        key = _cache_key("safety", job_title, wage, location)
+        cached = _get_cache("cache_safety", key)
+        if cached:
+            return jsonify({**cached, "cached": True})
 
-    raw_result = check_job_safety(
-        job_title=job_title,
-        job_description=job_description,
-        wage=wage,
-        location=location,
-        contractor_phone=contractor_phone,
-        contractor_name=contractor_name,
-    )
+        raw_result = check_job_safety(
+            job_title=job_title,
+            job_description=job_description,
+            wage=wage,
+            location=location,
+            contractor_phone=contractor_phone,
+            contractor_name=contractor_name,
+        )
 
-    score_match = re.search(r'TRUST SCORE:\s*(\d+)', raw_result)
-    verdict_match = re.search(r'VERDICT:\s*(SAFE|SUSPICIOUS)', raw_result, re.IGNORECASE)
-    reason_match = re.search(r'REASON:\s*(.+)', raw_result, re.DOTALL)
+        score_match = re.search(r'TRUST SCORE:\s*(\d+)', raw_result)
+        verdict_match = re.search(r'VERDICT:\s*(SAFE|SUSPICIOUS)', raw_result, re.IGNORECASE)
+        reason_match = re.search(r'REASON:\s*(.+)', raw_result, re.DOTALL)
 
-    result = {
-        "trust_score": int(score_match.group(1)) if score_match else 70,
-        "verdict": verdict_match.group(1).upper() if verdict_match else "SAFE",
-        "reason": reason_match.group(1).strip() if reason_match else raw_result.strip()
-    }
+        result = {
+            "trust_score": int(score_match.group(1)) if score_match else 70,
+            "verdict": verdict_match.group(1).upper() if verdict_match else "SAFE",
+            "reason": reason_match.group(1).strip() if reason_match else raw_result.strip()
+        }
 
-    _set_cache("cache_safety", key, result)
-    return jsonify({**result, "cached": False})
+        _set_cache("cache_safety", key, result)
+        return jsonify({**result, "cached": False})
+    except Exception as e:
+        return _safe_error(e, "/check_safety")
 
 
-# ── Endpoint 4: Chatbot (NOT cached — personalized per worker/message) ──
+# ── Endpoint 4: Chatbot (semantic-cached for schemes/knowledge intents only) ──
 @app.route("/chat", methods=["POST"])
+@limiter.limit("20 per minute")
 def chat_endpoint():
     try:
         data = request.get_json(force=True)
@@ -198,7 +230,7 @@ def chat_endpoint():
         if not message:
             return jsonify({"reply": "Please type a message."})
 
-        reply, nav_target = chat_with_worker(
+        reply, nav_target, was_cached = chat_with_worker(
             worker_message=message,
             language=language,
             worker_phone=worker_phone,
@@ -208,7 +240,11 @@ def chat_endpoint():
         if not reply:
             reply = "Sorry, I didn't quite get that. Could you ask again?"
 
-        return jsonify({"reply": reply, "navigateToTab": nav_target})
+        return jsonify({
+            "reply": reply,
+            "navigateToTab": nav_target,
+            "cached": was_cached,
+        })
 
     except Exception as e:
         print(f"[/chat] ERROR: {e}")
@@ -285,8 +321,7 @@ def expire_jobs():
         })
 
     except Exception as e:
-        print(f"[/api/jobs/expire] ERROR: {e}")
-        return jsonify({"success": False, "error": str(e)}), 500
+        return _safe_error(e, "/api/jobs/expire")
 
 
 # ── Endpoint 6: Government Scheme Reminder (called by n8n on a schedule) ──
@@ -337,8 +372,7 @@ def scheme_reminder():
         })
 
     except Exception as e:
-        print(f"[/api/schemes/remind] ERROR: {e}")
-        return jsonify({"success": False, "error": str(e)}), 500
+        return _safe_error(e, "/api/schemes/remind")
 
 # ── Endpoint 7: Feedback Collection Trigger (called by n8n on a schedule) ──
 @app.route("/api/jobs/request-feedback", methods=["POST"])
@@ -394,8 +428,7 @@ def request_feedback():
         })
 
     except Exception as e:
-        print(f"[/api/jobs/request-feedback] ERROR: {e}")
-        return jsonify({"success": False, "error": str(e)}), 500
+        return _safe_error(e, "/api/jobs/request-feedback")
 
 
 # ── Endpoint 8: Job Notification to Matching Workers (called by n8n on a schedule) ──
@@ -464,9 +497,8 @@ def notify_matching_workers():
         })
 
     except Exception as e:
-        print(f"[/api/jobs/notify-matches] ERROR: {e}")
-        return jsonify({"success": False, "error": str(e)}), 500
-    
+        return _safe_error(e, "/api/jobs/notify-matches")
+
 
 # ── Endpoint 9: KYC Scan (format validation + duplicate check) ──
 @app.route("/api/kyc/scan", methods=["POST"])
@@ -577,8 +609,7 @@ def kyc_scan():
         })
 
     except Exception as e:
-        print(f"[/api/kyc/scan] ERROR: {e}")
-        return jsonify({"success": False, "error": str(e)}), 500
+        return _safe_error(e, "/api/kyc/scan")
 
     
 # ── Endpoint 10: Fraud Alert to Admin (called by n8n on a schedule) ──
@@ -628,8 +659,7 @@ def alert_admin_of_reports():
         })
 
     except Exception as e:
-        print(f"[/api/reports/alert-admin] ERROR: {e}")
-        return jsonify({"success": False, "error": str(e)}), 500
+        return _safe_error(e, "/api/reports/alert-admin")
     
 # ── Endpoint 11: Payment Reminder (called by n8n on a schedule) ──
 @app.route("/api/payments/remind", methods=["POST"])
@@ -705,8 +735,7 @@ def payment_reminder():
         })
 
     except Exception as e:
-        print(f"[/api/payments/remind] ERROR: {e}")
-        return jsonify({"success": False, "error": str(e)}), 500
+        return _safe_error(e, "/api/payments/remind")
 
 # ── Endpoint 12: Job Posted Confirmation (Action Layer — called instantly by Flutter after job creation) ──
 @app.route("/actions/job-posted", methods=["POST"])
@@ -744,8 +773,7 @@ def job_posted_action():
         return jsonify({"success": True, "message": "Confirmation notification sent"})
 
     except Exception as e:
-        print(f"[/actions/job-posted] ERROR: {e}")
-        return jsonify({"success": False, "error": str(e)}), 500
+        return _safe_error(e, "/actions/job-posted")
 
 @app.route("/actions/encrypt-govt-id", methods=["POST"])
 @require_api_key
@@ -764,8 +792,7 @@ def encrypt_govt_id_action():
         })
 
     except Exception as e:
-        print(f"[/actions/encrypt-govt-id] ERROR: {e}")
-        return jsonify({"success": False, "error": str(e)}), 500
+        return _safe_error(e, "/actions/encrypt-govt-id")
 
 # ── Endpoint 13: Payment Received (Action Layer — replaces direct client write) ──
 def _last10(phone):
@@ -832,8 +859,7 @@ def payment_received_action():
         return jsonify({"success": True, "message": "Payment marked as received"})
 
     except Exception as e:
-        print(f"[/actions/payment-received] ERROR: {e}")
-        return jsonify({"success": False, "error": str(e)}), 500
+        return _safe_error(e, "/actions/payment-received")
     
     # ── Endpoint 14: Remove Job (Action Layer — replaces title-matching in dashboard) ──
 @app.route("/actions/remove-job", methods=["POST"])
@@ -890,8 +916,7 @@ def remove_job_action():
         })
 
     except Exception as e:
-        print(f"[/actions/remove-job] ERROR: {e}")
-        return jsonify({"success": False, "error": str(e)}), 500
+        return _safe_error(e, "/actions/remove-job")
     
 
 # ── Endpoint 15: Report Submitted (Action Layer — instant admin alert) ──
@@ -932,8 +957,7 @@ def report_submitted_action():
         return jsonify({"success": True, "message": "Admin alerted instantly"})
 
     except Exception as e:
-        print(f"[/actions/report-submitted] ERROR: {e}")
-        return jsonify({"success": False, "error": str(e)}), 500
+        return _safe_error(e, "/actions/report-submitted")
 
 
 # ── Endpoint 16: Registration Complete (Action Layer — instant welcome notification) ──
@@ -969,8 +993,7 @@ def register_complete_action():
         return jsonify({"success": True, "message": "Welcome notification sent"})
 
     except Exception as e:
-        print(f"[/actions/register-complete] ERROR: {e}")
-        return jsonify({"success": False, "error": str(e)}), 500
+        return _safe_error(e, "/actions/register-complete")
 
 
 # ── Endpoint 17: Application Decision (Action Layer — accept/reject + instant notification) ──
@@ -1028,8 +1051,7 @@ def application_decision_action():
         return jsonify({"success": True, "message": f"Application {decision}"})
 
     except Exception as e:
-        print(f"[/actions/application-decision] ERROR: {e}")
-        return jsonify({"success": False, "error": str(e)}), 500
+        return _safe_error(e, "/actions/application-decision")
 
 
 
@@ -1073,8 +1095,7 @@ def application_submitted_action():
         return jsonify({"success": True, "message": "Contractor notified"})
 
     except Exception as e:
-        print(f"[/actions/application-submitted] ERROR: {e}")
-        return jsonify({"success": False, "error": str(e)}), 500
+        return _safe_error(e, "/actions/application-submitted")
 
 @app.route("/actions/mark-notification-read", methods=["POST"])
 @require_api_key
@@ -1091,8 +1112,7 @@ def mark_notification_read_action():
         return jsonify({"success": True, "message": "Notification marked as read"})
 
     except Exception as e:
-        print(f"[/actions/mark-notification-read] ERROR: {e}")
-        return jsonify({"success": False, "error": str(e)}), 500
+        return _safe_error(e, "/actions/mark-notification-read")
 
 # ── Endpoint 18: KYC Decision (Action Layer — admin approve/reject with instant notification) ──
 @app.route("/actions/kyc-decision", methods=["POST"])
@@ -1136,8 +1156,7 @@ def kyc_decision_action():
         return jsonify({"success": True, "message": f"KYC marked {decision}"})
 
     except Exception as e:
-        print(f"[/actions/kyc-decision] ERROR: {e}")
-        return jsonify({"success": False, "error": str(e)}), 500
+        return _safe_error(e, "/actions/kyc-decision")
     
 
 # ── Endpoint 19: Register Device Token (Action Layer — for FCM push notifications) ──
@@ -1176,8 +1195,7 @@ def register_device_token_action():
         return jsonify({"success": True, "message": "Device token registered"})
 
     except Exception as e:
-        print(f"[/actions/register-device-token] ERROR: {e}")
-        return jsonify({"success": False, "error": str(e)}), 500    
+        return _safe_error(e, "/actions/register-device-token")    
 
 
 # ── Health check ──

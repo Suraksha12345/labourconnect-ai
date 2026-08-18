@@ -27,7 +27,7 @@ def match_jobs(worker_skill, worker_location, min_wage=0, max_wage=0, worker_exp
                 "well they fit this specific worker."
             ),
             tools=tools,
-            llm="groq/llama-3.3-70b-versatile",
+            llm="groq/qwen/qwen3.6-27b",
             verbose=True,
         )
 

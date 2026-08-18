@@ -4,17 +4,82 @@ Uses a persistent MCP connection (started once at Flask boot) to
 fetch jobs/schemes/profile/knowledge — no per-request subprocess
 spawn, no reloading the RAG model each call. Tulu pre-written
 responses are unchanged.
+
+CACHING (new): general-knowledge intents (schemes, safety/law
+knowledge) are cached in Firestore for 24 hours, since these
+answers don't depend on any specific worker. Personalized intents
+(jobs, profile) and general chit-chat are never cached.
 """
 
 import os
+import hashlib
+from datetime import datetime, timezone
+
 from dotenv import load_dotenv
 from groq import Groq
+from firebase_admin import firestore as fb_firestore
+
 from mcp_persistent import get_client
 
 load_dotenv()
 groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
 
+# Firestore client is created LAZILY (on first actual use), not at
+# import time — app.py imports this module BEFORE it initializes
+# firebase_admin further down in its own file, so connecting here
+# immediately would fail with "default Firebase app does not exist".
+# By the time a real chat request comes in, app.py has already
+# finished its Firebase init, so this works safely.
+_db = None
+
+
+def _get_db():
+    global _db
+    if _db is None:
+        _db = fb_firestore.client()
+    return _db
+
+
 CHATBOT_ROLE = "LabourConnect Chatbot Agent"
+
+# Cache TTL: 24 hours in seconds (same convention as app.py's cache)
+CACHE_TTL_SECONDS = 86400
+
+
+def _cache_key(*parts):
+    """Create a short, safe Firestore document ID from cache key parts."""
+    raw = "_".join(str(p).strip().lower() for p in parts)
+    return hashlib.md5(raw.encode()).hexdigest()
+
+
+def _get_cache(collection, key):
+    """Return cached value if it exists and hasn't expired, else None."""
+    try:
+        doc = _get_db().collection(collection).document(key).get()
+        if doc.exists:
+            data = doc.to_dict()
+            cached_at = data.get("cached_at")
+            if cached_at:
+                age = (datetime.now(timezone.utc) - cached_at).total_seconds()
+                if age < CACHE_TTL_SECONDS:
+                    print(f"[chat cache HIT] {collection}/{key}")
+                    return data.get("value")
+    except Exception as e:
+        print(f"[chat cache GET error] {e}")
+    return None
+
+
+def _set_cache(collection, key, value):
+    """Save a value to Firestore cache with current timestamp."""
+    try:
+        _get_db().collection(collection).document(key).set({
+            "value": value,
+            "cached_at": datetime.now(timezone.utc),
+        })
+        print(f"[chat cache SET] {collection}/{key}")
+    except Exception as e:
+        print(f"[chat cache SET error] {e}")
+
 
 TULU_RESPONSES = {
     "job_search": (
@@ -35,7 +100,7 @@ TULU_RESPONSES = {
 
 
 # ════════════════════════════════════════════════════════════
-# NAVIGATION INTENT (new — for chatbot-driven page navigation)
+# NAVIGATION INTENT (for chatbot-driven page navigation)
 # ════════════════════════════════════════════════════════════
 
 NAVIGATION_KEYWORDS = {
@@ -127,7 +192,8 @@ def _build_chatbot_backstory(language):
     )
 
 
-def chat_with_worker(worker_message, language="auto", worker_phone="", return_context=False, return_navigation=False):
+def chat_with_worker(worker_message, language="auto", worker_phone="",
+                      return_context=False, return_navigation=False):
     nav_target = detect_navigation_intent(worker_message)
 
     if language == "Tulu":
@@ -135,11 +201,23 @@ def chat_with_worker(worker_message, language="auto", worker_phone="", return_co
         if intent and intent in TULU_RESPONSES:
             reply = TULU_RESPONSES[intent]
             if return_navigation:
-                return reply, nav_target
+                return reply, nav_target, False
             return (reply, "") if return_context else reply
 
     intent = _detect_intent(worker_message)
     mcp_context = ""
+
+    # Only cache general-knowledge intents — never jobs/profile (personalized)
+    # or general chit-chat (too varied to usefully cache).
+    cacheable = intent in ("schemes", "knowledge")
+    cache_key = None
+    if cacheable:
+        cache_key = _cache_key("chat", intent, worker_message, language)
+        cached_reply = _get_cache("cache_chat", cache_key)
+        if cached_reply:
+            if return_navigation:
+                return cached_reply, nav_target, True
+            return (cached_reply, "") if return_context else cached_reply
 
     try:
         data = _fetch_chatbot_data(
@@ -183,7 +261,7 @@ def chat_with_worker(worker_message, language="auto", worker_phone="", return_co
         prompt = f"{mcp_context}\nWorker's question: {worker_message}"
 
     response = groq_client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+        model="openai/gpt-oss-120b",
         messages=[
             {"role": "system", "content": _build_chatbot_backstory(language)},
             {"role": "user", "content": prompt}
@@ -191,8 +269,12 @@ def chat_with_worker(worker_message, language="auto", worker_phone="", return_co
     )
 
     reply = response.choices[0].message.content
+
+    if cacheable and cache_key:
+        _set_cache("cache_chat", cache_key, reply)
+
     if return_navigation:
-        return reply, nav_target
+        return reply, nav_target, False
     return (reply, mcp_context) if return_context else reply
 
 
