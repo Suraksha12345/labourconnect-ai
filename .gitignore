@@ -6,3 +6,4 @@ __pycache__/
 serviceAccountKey.json
 ngrok.exe
 rag/chroma_db/
+rag/chroma_db/
